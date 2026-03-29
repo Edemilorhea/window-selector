@@ -303,7 +303,12 @@ impl OverlayManager {
             }
         };
         let accent = get_accent_color();
-        match OverlayRenderer::new_with_config(self.overlay_hwnds[0], dpi_scale, accent, render_config) {
+        match OverlayRenderer::new_with_config(
+            self.overlay_hwnds[0],
+            dpi_scale,
+            accent,
+            render_config,
+        ) {
             Ok(r) => {
                 self.renderer = Some(r);
                 tracing::debug!("OverlayRenderer initialized (dpi_scale={})", dpi_scale);
@@ -386,6 +391,9 @@ impl OverlayManager {
         self.render_selected = None;
         self.is_label_mode = true;
 
+        // Clear grid layout (label mode doesn't use grid)
+        self.grid_layout = None;
+
         // Calculate virtual screen bounds (covering all monitors)
         let mut min_x = i32::MAX;
         let mut min_y = i32::MAX;
@@ -445,7 +453,12 @@ impl OverlayManager {
             }
         };
         let accent = get_accent_color();
-        match OverlayRenderer::new_with_config(self.overlay_hwnds[0], dpi_scale, accent, render_config) {
+        match OverlayRenderer::new_with_config(
+            self.overlay_hwnds[0],
+            dpi_scale,
+            accent,
+            render_config,
+        ) {
             Ok(r) => {
                 self.renderer = Some(r);
                 tracing::debug!(
@@ -461,8 +474,26 @@ impl OverlayManager {
             }
         }
 
-        // Set state BEFORE ShowWindow.
+        // Set state BEFORE rendering.
         *state = OverlayState::LabelMode { selected: None };
+
+        // Pre-clear the render target to transparent color-key before showing the window.
+        // This prevents the black flash by ensuring the first visible frame is already transparent.
+        if let Some(renderer) = &self.renderer {
+            unsafe {
+                renderer.render_target.BeginDraw();
+                // Clear to color-key color (RGB 1,1,1) for transparency
+                renderer.render_target.Clear(Some(
+                    &windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+                        r: 1.0 / 255.0,
+                        g: 1.0 / 255.0,
+                        b: 1.0 / 255.0,
+                        a: 1.0,
+                    },
+                ));
+                let _ = renderer.render_target.EndDraw(None, None);
+            }
+        }
 
         unsafe {
             // For label mode, use color-key transparency (like the label overlay in normal mode).
@@ -479,12 +510,9 @@ impl OverlayManager {
 
             // Take keyboard focus.
             let _ = SetForegroundWindow(self.overlay_hwnds[0]);
-
-            // Force repaint.
-            let _ = InvalidateRect(self.overlay_hwnds[0], None, true);
         }
 
-        // Render labels immediately.
+        // Render labels immediately after showing the window.
         self.render_frame();
 
         tracing::info!("Label mode activated with {} windows", windows.len());
