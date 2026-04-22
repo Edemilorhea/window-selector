@@ -303,7 +303,12 @@ impl OverlayManager {
             }
         };
         let accent = get_accent_color();
-        match OverlayRenderer::new_with_config(self.overlay_hwnds[0], dpi_scale, accent, render_config) {
+        match OverlayRenderer::new_with_config(
+            self.overlay_hwnds[0],
+            dpi_scale,
+            accent,
+            render_config,
+        ) {
             Ok(r) => {
                 self.renderer = Some(r);
                 tracing::debug!("OverlayRenderer initialized (dpi_scale={})", dpi_scale);
@@ -445,7 +450,12 @@ impl OverlayManager {
             }
         };
         let accent = get_accent_color();
-        match OverlayRenderer::new_with_config(self.overlay_hwnds[0], dpi_scale, accent, render_config) {
+        match OverlayRenderer::new_with_config(
+            self.overlay_hwnds[0],
+            dpi_scale,
+            accent,
+            render_config,
+        ) {
             Ok(r) => {
                 self.renderer = Some(r);
                 tracing::debug!(
@@ -619,6 +629,94 @@ impl OverlayManager {
                 let _ = windows::Win32::Graphics::Gdi::ValidateRect(hwnd, None);
             }
         }
+    }
+
+    /// Update monitor geometry after a display configuration change (WM_DISPLAYCHANGE).
+    ///
+    /// Replaces the stored monitor list with `new_monitors`, then moves/resizes every
+    /// overlay HWND (thumbnail overlays + label overlay) to match the new geometry.
+    /// The label overlay is always sized to the primary monitor.
+    ///
+    /// This must be called while the overlay is **hidden**; callers must dismiss the
+    /// overlay before invoking this method.
+    pub fn on_display_change(&mut self, new_monitors: Vec<MonitorInfo>) {
+        self.monitors = new_monitors;
+
+        if self.monitors.is_empty() {
+            tracing::warn!("on_display_change: no monitors reported");
+            return;
+        }
+
+        unsafe {
+            // Resize/reposition each per-monitor thumbnail overlay HWND.
+            let hwnd_count = self.overlay_hwnds.len();
+            for (i, hwnd) in self.overlay_hwnds.iter().enumerate() {
+                // If we now have fewer monitors than HWNDs (e.g. a monitor was
+                // disconnected), hide the excess windows; they will be reused if
+                // the monitor reappears later.
+                if i >= self.monitors.len() {
+                    let _ = ShowWindow(*hwnd, SW_HIDE);
+                    tracing::debug!(
+                        "on_display_change: HWND {:?} has no matching monitor (i={}), hidden",
+                        hwnd,
+                        i
+                    );
+                    continue;
+                }
+                let rect = self.monitors[i].rect;
+                let _ = SetWindowPos(
+                    *hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE,
+                );
+                tracing::debug!(
+                    "on_display_change: HWND {:?} repositioned to {:?}",
+                    hwnd,
+                    rect
+                );
+            }
+
+            // If we now have more monitors than HWNDs we cannot create new windows
+            // here (window creation needs an HINSTANCE and the wndproc pointer which
+            // are held by the caller).  Log a warning so the discrepancy is visible;
+            // a full restart will pick up the new monitor.
+            if self.monitors.len() > hwnd_count {
+                tracing::warn!(
+                    "on_display_change: {} monitors but only {} overlay HWNDs; \
+                     extra monitors will be uncovered until restart",
+                    self.monitors.len(),
+                    hwnd_count
+                );
+            }
+
+            // Resize the label overlay to the (new) primary monitor.
+            if let Some(lhwnd) = self.label_hwnd {
+                let primary_rect = self.monitors[0].rect;
+                let _ = SetWindowPos(
+                    lhwnd,
+                    windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
+                    primary_rect.left,
+                    primary_rect.top,
+                    primary_rect.right - primary_rect.left,
+                    primary_rect.bottom - primary_rect.top,
+                    SWP_NOACTIVATE,
+                );
+                tracing::debug!(
+                    "on_display_change: label HWND {:?} repositioned to {:?}",
+                    lhwnd,
+                    primary_rect
+                );
+            }
+        }
+
+        tracing::info!(
+            "on_display_change: updated to {} monitor(s)",
+            self.monitors.len()
+        );
     }
 
     #[allow(dead_code)]

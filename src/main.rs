@@ -37,29 +37,30 @@ use tray::{
     add_tray_icon, remove_tray_icon, show_balloon, MENU_ABOUT, MENU_DIRECT_SWITCH, MENU_EXIT,
     MENU_SETTINGS, WM_TRAY_CALLBACK,
 };
-use window_enumerator::{filter_occluded_for_label_mode, register_overlay_hwnds, snapshot_windows};
+use window_enumerator::{
+    filter_occluded_for_label_mode, register_overlay_hwnds, resolve_quick_tags, snapshot_windows,
+};
 use window_switcher::{restore_focus, switch_to_window};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DrawTextW, EndPaint, FillRect, RoundRect,
     SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT,
     PS_NULL, TRANSPARENT,
 };
-use windows::Win32::UI::WindowsAndMessaging::DrawIconEx;
-use windows::Win32::UI::WindowsAndMessaging::DI_NORMAL;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::WindowsAndMessaging::DrawIconEx;
+use windows::Win32::UI::WindowsAndMessaging::DI_NORMAL;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    TranslateMessage, GWLP_USERDATA, HMENU,
-    MSG, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_TIMER, WM_ACTIVATE, WM_PAINT,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, CS_HREDRAW, CS_VREDRAW, WA_INACTIVE,
-    HWND_MESSAGE,
+    GetMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
+    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_MESSAGE, MSG, WA_INACTIVE, WM_ACTIVATE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_PAINT, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_OVERLAPPEDWINDOW,
 };
 
 const MSG_WINDOW_CLASS: &str = "WindowSelectorMsgWnd\0";
@@ -117,8 +118,8 @@ fn main() {
     // main(); Windows releases it automatically when the process exits.
     let _mutex = unsafe {
         match CreateMutexW(
-            None,  // default security
-            true,  // this process claims ownership immediately
+            None, // default security
+            true, // this process claims ownership immediately
             w!("Global\\window-selector-single-instance"),
         ) {
             Ok(handle) => {
@@ -417,6 +418,11 @@ unsafe extern "system" fn main_wndproc(
             LRESULT(0)
         }
 
+        WM_DISPLAYCHANGE => {
+            handle_display_change(app);
+            LRESULT(0)
+        }
+
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -574,15 +580,7 @@ unsafe extern "system" fn overlay_wndproc(
                         // DrawIconEx renders an HICON into a GDI HDC at any size.
                         // DI_NORMAL = draw the icon with its mask (transparency respected).
                         let _ = DrawIconEx(
-                            hdc,
-                            icon_x,
-                            icon_y,
-                            hicon,
-                            icon_size,
-                            icon_size,
-                            0,
-                            None,
-                            DI_NORMAL,
+                            hdc, icon_x, icon_y, hicon, icon_size, icon_size, 0, None, DI_NORMAL,
                         );
                     }
 
@@ -703,8 +701,8 @@ unsafe fn activate_overlay(app: &mut AppState) {
         app.overlay_manager.all_hwnds(),
         &mon_clone,
         &app.mru_tracker,
-        &app.session_tags,
     );
+    app.session_tags = resolve_quick_tags(&mut app.window_snapshot, &app.config.quick_tags);
 
     tracing::info!("Activating overlay: {} windows", app.window_snapshot.len());
 
@@ -763,12 +761,12 @@ unsafe fn activate_label_mode(app: &mut AppState) {
     app.session_tags.release_closed();
 
     let mon_clone = app.overlay_manager.monitors.clone();
-    let raw_snapshot = snapshot_windows(
+    let mut raw_snapshot = snapshot_windows(
         app.overlay_manager.all_hwnds(),
         &mon_clone,
         &app.mru_tracker,
-        &app.session_tags,
     );
+    app.session_tags = resolve_quick_tags(&mut raw_snapshot, &app.config.quick_tags);
 
     // Filter out windows that are fully occluded by higher-Z-order windows.
     // These would only add invisible labels that confuse the user.
@@ -909,7 +907,29 @@ unsafe fn handle_overlay_key(vk_code: u32) {
                 dismiss_overlay(app);
             }
         }
-        KeyAction::TagAssigned => {
+        KeyAction::TagAssigned { number, hwnd } => {
+            if let Some(exe_path) = app
+                .window_snapshot
+                .iter()
+                .find(|window| window.hwnd == hwnd)
+                .and_then(|window| window.exe_path.clone())
+            {
+                app.config.set_quick_tag(number, exe_path);
+                if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
+                    tracing::error!("Failed to save config after quick tag assignment: {}", e);
+                }
+            } else {
+                app.config.remove_quick_tag(number);
+                app.session_tags.remove(number);
+                if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
+                    tracing::error!("Failed to save config after quick tag removal: {}", e);
+                }
+                tracing::warn!(
+                    "Quick tag {} assigned to window without executable path",
+                    number
+                );
+            }
+
             // Refresh number_tag fields from session_tags so the quick list updates
             for w in &mut app.window_snapshot {
                 w.number_tag = app.session_tags.get_tag_for_hwnd(w.hwnd);
@@ -921,6 +941,38 @@ unsafe fn handle_overlay_key(vk_code: u32) {
             }
         }
     }
+}
+
+/// Called on `WM_DISPLAYCHANGE` — re-enumerate monitors and update every overlay HWND
+/// so the selector mask covers the correct area at the new resolution.
+///
+/// If the overlay is currently visible (Active / LabelMode) it is dismissed first so
+/// the user is not stuck inside a mispositioned overlay.  The next hotkey press will
+/// open it at the correct size.
+unsafe fn handle_display_change(app: &mut AppState) {
+    tracing::info!("WM_DISPLAYCHANGE received — re-enumerating monitors");
+
+    // Dismiss the overlay if it is currently visible so we don't leave a
+    // stale, wrongly-sized overlay on screen.
+    match &app.overlay_state {
+        OverlayState::Active { .. } => {
+            tracing::info!("Display changed while overlay active — dismissing");
+            dismiss_overlay(app);
+        }
+        OverlayState::LabelMode { .. } => {
+            tracing::info!("Display changed while label mode active — dismissing");
+            dismiss_label_mode(app);
+        }
+        _ => {}
+    }
+
+    // Re-enumerate monitors and push new geometry into the overlay manager.
+    let new_monitors = get_all_monitors();
+    tracing::info!(
+        "New monitor layout: {} monitor(s)",
+        new_monitors.len()
+    );
+    app.overlay_manager.on_display_change(new_monitors);
 }
 
 unsafe fn handle_fade_timer(app: &mut AppState) {
