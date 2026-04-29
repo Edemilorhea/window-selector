@@ -33,6 +33,19 @@ fn default_title_font_size() -> f32 {
 fn default_background_opacity() -> f32 {
     0.86
 }
+fn default_label_overlap_strategy() -> LabelOverlapStrategy {
+    LabelOverlapStrategy::AutoNudge
+}
+
+/// How to handle overlapping labels in label mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelOverlapStrategy {
+    /// Automatically nudge overlapping labels apart (default).
+    AutoNudge,
+    /// Place labels only inside the window's visible (non-occluded) region.
+    VisibleRegion,
+}
 
 /// Persisted application configuration.
 /// Stored at %APPDATA%\window-selector\config.toml
@@ -85,6 +98,11 @@ pub struct AppConfig {
     /// Alpha channel of the backdrop brush (dark rectangle behind grid). Range: 0.0–1.0. Default: 0.86.
     #[serde(default = "default_background_opacity")]
     pub background_opacity: f32,
+
+    /// How to handle overlapping labels in label mode.
+    /// Default: AutoNudge.
+    #[serde(default = "default_label_overlap_strategy")]
+    pub label_overlap_strategy: LabelOverlapStrategy,
 }
 
 impl Default for AppConfig {
@@ -102,6 +120,7 @@ impl Default for AppConfig {
             label_font_size: default_label_font_size(),
             title_font_size: default_title_font_size(),
             background_opacity: default_background_opacity(),
+            label_overlap_strategy: default_label_overlap_strategy(),
         }
     }
 }
@@ -223,6 +242,7 @@ mod tests {
             label_font_size: 22.0,
             title_font_size: 15.0,
             background_opacity: 0.9,
+            label_overlap_strategy: LabelOverlapStrategy::VisibleRegion,
         };
         AppConfig::save(&dir, &original).expect("save should succeed");
         let loaded = AppConfig::load(&dir).expect("load should succeed");
@@ -235,6 +255,7 @@ mod tests {
         assert!((loaded.label_font_size - original.label_font_size).abs() < 0.001);
         assert!((loaded.title_font_size - original.title_font_size).abs() < 0.001);
         assert!((loaded.background_opacity - original.background_opacity).abs() < 0.001);
+        assert_eq!(loaded.label_overlap_strategy, original.label_overlap_strategy);
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }
@@ -285,6 +306,7 @@ mod tests {
         assert!((config.background_opacity - 0.86).abs() < 0.001);
         assert!(!config.launch_at_startup);
         assert!(!config.direct_switch);
+        assert_eq!(config.label_overlap_strategy, LabelOverlapStrategy::AutoNudge);
     }
 
     #[test]
@@ -333,6 +355,8 @@ mod tests {
             "validate() must not change default direct_switch");
         assert_eq!(validated.launch_at_startup, original.launch_at_startup,
             "validate() must not change default launch_at_startup");
+        assert_eq!(validated.label_overlap_strategy, original.label_overlap_strategy,
+            "validate() must not change default label_overlap_strategy");
     }
 
     #[test]
