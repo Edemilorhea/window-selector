@@ -786,6 +786,7 @@ unsafe fn activate_label_mode(app: &mut AppState) {
         title_font_size: app.config.title_font_size,
         background_opacity: app.config.background_opacity,
     };
+    app.overlay_manager.label_overlap_strategy = app.config.label_overlap_strategy;
     app.overlay_manager
         .show_label_mode(&snap, &mut app.overlay_state, render_config);
 

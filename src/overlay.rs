@@ -1,5 +1,6 @@
 use crate::accent_color::get_accent_color;
 use crate::animation::{FadeAnimator, FADE_TIMER_ID};
+use crate::config::LabelOverlapStrategy;
 use crate::dwm_thumbnails::{self, ThumbnailHandle};
 use crate::grid_layout::CellRect;
 use crate::grid_layout::{compute_grid_with_padding, GridLayout, QUICK_LIST_BAR_HEIGHT};
@@ -16,7 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, KillTimer, RegisterClassExW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HMENU, LWA_ALPHA,
     LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, HWND_TOP,
+    SWP_SHOWWINDOW,
 };
 
 const OVERLAY_CLASS_NAME: &str = "WindowSelectorOverlay\0";
@@ -85,6 +87,8 @@ pub struct OverlayManager {
     pub render_selected: Option<usize>,
     /// Whether we're in label mode (affects rendering).
     pub is_label_mode: bool,
+    /// How to handle overlapping labels in label mode.
+    pub label_overlap_strategy: LabelOverlapStrategy,
 }
 
 // OverlayManager contains HWND values (raw pointers internally). The type is not
@@ -109,6 +113,7 @@ impl OverlayManager {
             render_snapshot: Vec::new(),
             render_selected: None,
             is_label_mode: false,
+            label_overlap_strategy: LabelOverlapStrategy::AutoNudge,
         }
     }
 
@@ -525,16 +530,35 @@ impl OverlayManager {
         }
 
         // Skip fade-out — hide immediately.
-        self.hide_windows();
-        *state = OverlayState::Hidden;
 
-        // Deactivate keyboard hook.
+        // Deactivate keyboard hook FIRST (before switching windows)
         crate::keyboard_hook::set_active(false);
 
-        // Switch to target or restore previous foreground.
+        // Switch to target window FIRST (so it takes focus before hiding overlay).
+        // This prevents black flash because the target window is already in foreground
+        // when the overlay becomes invisible.
         if let Some(target) = switch_target {
             let _ = crate::window_switcher::switch_to_window(target);
+
+            // Ensure the target window is fully visible on its monitor before hiding overlay.
+            // This prevents black flash on non-primary monitors by forcing the window
+            // to the top and making it visible on its screen.
+            unsafe {
+                let _ = SetWindowPos(
+                    target,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                );
+            }
         }
+
+        // NOW hide the overlay — the target window is already visible, so no black flash.
+        self.hide_windows();
+        *state = OverlayState::Hidden;
 
         tracing::info!("Overlay hidden immediately: target={:?}", switch_target);
     }
@@ -627,7 +651,12 @@ impl OverlayManager {
             if self.is_label_mode {
                 // Label mode: render labels only
                 if let Some(&hwnd) = self.overlay_hwnds.first() {
-                    renderer.render_labels_only(&self.render_snapshot, self.render_selected, hwnd);
+                    renderer.render_labels_only(
+                        &self.render_snapshot,
+                        self.render_selected,
+                        hwnd,
+                        self.label_overlap_strategy,
+                    );
                 }
             } else if let Some(layout) = &self.grid_layout {
                 // Normal mode: render grid with thumbnails

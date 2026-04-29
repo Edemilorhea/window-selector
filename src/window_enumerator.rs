@@ -211,15 +211,15 @@ pub fn snapshot_windows(
 
 /// A simple axis-aligned rectangle used for occlusion calculations.
 #[derive(Clone, Copy, Debug)]
-struct SimpleRect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+pub(crate) struct SimpleRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 impl SimpleRect {
-    fn from_win32(r: &RECT) -> Option<Self> {
+    pub(crate) fn from_win32(r: &RECT) -> Option<Self> {
         if r.right <= r.left || r.bottom <= r.top {
             return None;
         }
@@ -231,7 +231,7 @@ impl SimpleRect {
         })
     }
 
-    fn intersects(&self, other: &Self) -> bool {
+    pub(crate) fn intersects(&self, other: &Self) -> bool {
         self.left < other.right
             && self.right > other.left
             && self.top < other.bottom
@@ -239,7 +239,7 @@ impl SimpleRect {
     }
 
     /// Subtract `other` from `self`, returning the remaining pieces (0-4 sub-rects).
-    fn subtract(&self, other: &Self) -> Vec<Self> {
+    pub(crate) fn subtract(&self, other: &Self) -> Vec<Self> {
         if !self.intersects(other) {
             return vec![*self];
         }
@@ -294,9 +294,9 @@ impl SimpleRect {
 }
 
 /// Z-order snapshot used for occlusion detection.
-struct ZOrderEntry {
-    hwnd: HWND,
-    rect: SimpleRect,
+pub(crate) struct ZOrderEntry {
+    pub hwnd: HWND,
+    pub rect: SimpleRect,
 }
 
 /// Collect all visible, non-minimized windows in Z-order (front to back).
@@ -417,6 +417,17 @@ pub fn filter_occluded_for_label_mode(windows: Vec<WindowInfo>) -> Vec<WindowInf
     let mut filtered = filtered;
     crate::letter_assignment::assign_letters(&mut filtered);
     filtered
+}
+
+/// Collect all visible, non-minimized windows in Z-order (front to back).
+/// Excludes the application's own overlay HWNDs.
+pub(crate) fn collect_z_order_entries() -> Vec<ZOrderEntry> {
+    let mut entries: Vec<ZOrderEntry> = Vec::new();
+    unsafe {
+        let ptr = &mut entries as *mut Vec<ZOrderEntry>;
+        let _ = EnumWindows(Some(z_order_callback), LPARAM(ptr as isize));
+    }
+    entries
 }
 
 /// Check whether the given window would pass the Alt+Tab filter.

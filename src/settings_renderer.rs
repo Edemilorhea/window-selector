@@ -2,7 +2,7 @@
 ///
 /// All drawing is done via Direct2D + DirectWrite, following the same pattern
 /// as `overlay_renderer.rs`. No Win32 GDI controls are used.
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LabelOverlapStrategy};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U};
@@ -36,6 +36,7 @@ pub struct DrawState {
     pub slider_values: [f32; 6],
     pub direct_switch: bool,
     pub launch_at_startup: bool,
+    pub label_overlap_strategy: LabelOverlapStrategy,
 }
 
 /// Hit-test rectangles for all controls — populated during draw, used for mouse events.
@@ -49,6 +50,10 @@ pub struct ControlRects {
     /// fade_duration_ms, grid_padding, label_font_size, title_font_size)
     pub slider_tracks: [RECT; 6],
     pub reset_button: RECT,
+    /// Label overlap strategy: AutoNudge button rect
+    pub label_overlap_nudge: RECT,
+    /// Label overlap strategy: VisibleRegion button rect
+    pub label_overlap_visible: RECT,
 }
 
 fn d2d_color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
@@ -400,8 +405,46 @@ impl SettingsRenderer {
             rects.launch_at_startup_toggle = las_rect;
             self.draw_toggle(&las_rect, state.launch_at_startup);
 
+            // ---- LABEL MODE SECTION ----
+            let lm_y = 250.0_f32;
+            draw_section(lm_y, "LABEL MODE");
+
+            // Label overlap strategy: AutoNudge (y=280)
+            let lon_y = 280.0_f32;
+            draw_label(lon_y + 5.0, "Label overlap");
+            let opt_w = 130.0_f32;
+            let opt_h = 28.0_f32;
+            let opt_gap = 8.0_f32;
+            let opt_start_x = control_right - opt_w * 2.0 - opt_gap;
+            let nudge_rect = RECT {
+                left: opt_start_x as i32,
+                top: lon_y as i32,
+                right: (opt_start_x + opt_w) as i32,
+                bottom: (lon_y + opt_h) as i32,
+            };
+            rects.label_overlap_nudge = nudge_rect;
+            self.draw_option_button(
+                &nudge_rect,
+                "Auto nudge",
+                state.label_overlap_strategy == LabelOverlapStrategy::AutoNudge,
+            );
+
+            // Label overlap strategy: VisibleRegion (y=280, to the right)
+            let visible_rect = RECT {
+                left: (opt_start_x + opt_w + opt_gap) as i32,
+                top: lon_y as i32,
+                right: (opt_start_x + opt_w * 2.0 + opt_gap) as i32,
+                bottom: (lon_y + opt_h) as i32,
+            };
+            rects.label_overlap_visible = visible_rect;
+            self.draw_option_button(
+                &visible_rect,
+                "Visible region",
+                state.label_overlap_strategy == LabelOverlapStrategy::VisibleRegion,
+            );
+
             // ---- APPEARANCE SECTION ----
-            let app_y = 260.0_f32;
+            let app_y = 330.0_f32;
             draw_section(app_y, "APPEARANCE");
 
             // Sliders: overlay_opacity, background_opacity, fade_duration_ms,
@@ -415,7 +458,7 @@ impl SettingsRenderer {
                 ("Title font size", 8.0, 24.0, " px"),
             ];
 
-            let slider_base_y = 290.0_f32;
+            let slider_base_y = 360.0_f32;
             let slider_row_h = 40.0_f32;
             let slider_left = control_left;
             let slider_right = control_right - 55.0; // leave room for value text
@@ -457,7 +500,7 @@ impl SettingsRenderer {
             }
 
             // ---- RESET BUTTON ----
-            let btn_y = 540.0_f32;
+            let btn_y = 610.0_f32;
             let btn_w = 200.0_f32;
             let btn_h = 36.0_f32;
             let btn_x = (panel_width - btn_w) / 2.0;
@@ -622,6 +665,48 @@ impl SettingsRenderer {
                 &self.button_format,
                 &r,
                 &self.button_text_brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    /// Draw an option button (radio-button-style pill).
+    /// `selected` determines whether it uses the accent fill or the muted background.
+    fn draw_option_button(&self, rect: &RECT, text: &str, selected: bool) {
+        unsafe {
+            let r = rect_to_d2d(rect);
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: r,
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+
+            // Fill: accent when selected, muted dark when not
+            let fill_brush = if selected {
+                &self.toggle_on_brush
+            } else {
+                &self.hotkey_field_brush
+            };
+            self.render_target
+                .FillRoundedRectangle(&rounded, fill_brush);
+
+            // Border: subtle in both states
+            self.render_target
+                .DrawRoundedRectangle(&rounded, &self.separator_brush, 1.0, None);
+
+            // Text: bright when selected, dim when not
+            let text_brush = if selected {
+                &self.button_text_brush
+            } else {
+                &self.value_brush
+            };
+            let t: Vec<u16> = text.encode_utf16().collect();
+            self.render_target.DrawText(
+                &t,
+                &self.button_format,
+                &r,
+                text_brush,
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
             );
