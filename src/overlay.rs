@@ -482,12 +482,9 @@ impl OverlayManager {
         // Set state BEFORE rendering.
         *state = OverlayState::LabelMode { selected: None };
 
-        // Render the first frame BEFORE showing the window so the user never sees a blank frame.
-        // This eliminates the flash that would occur if ShowWindow displayed an empty buffer.
-        self.render_frame();
-
         unsafe {
-            // For label mode, use color-key transparency (like the label overlay in normal mode).
+            // For label mode, use color-key transparency MUST be set BEFORE rendering,
+            // so that the render target uses the correct transparency mode.
             // RGB(1,1,1) will be transparent, everything else will be visible.
             let _ = SetLayeredWindowAttributes(
                 self.overlay_hwnds[0],
@@ -495,7 +492,12 @@ impl OverlayManager {
                 0,
                 LWA_COLORKEY,
             );
+        }
 
+        // Render the first frame BEFORE showing the window so the user never sees a blank frame.
+        self.render_frame();
+
+        unsafe {
             // Show only the primary overlay in label mode
             let _ = ShowWindow(self.overlay_hwnds[0], SW_SHOWNOACTIVATE);
 
