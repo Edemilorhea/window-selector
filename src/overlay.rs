@@ -482,23 +482,9 @@ impl OverlayManager {
         // Set state BEFORE rendering.
         *state = OverlayState::LabelMode { selected: None };
 
-        // Pre-clear the render target to transparent color-key before showing the window.
-        // This prevents the black flash by ensuring the first visible frame is already transparent.
-        if let Some(renderer) = &self.renderer {
-            unsafe {
-                renderer.render_target.BeginDraw();
-                // Clear to color-key color (RGB 1,1,1) for transparency
-                renderer.render_target.Clear(Some(
-                    &windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
-                        r: 1.0 / 255.0,
-                        g: 1.0 / 255.0,
-                        b: 1.0 / 255.0,
-                        a: 1.0,
-                    },
-                ));
-                let _ = renderer.render_target.EndDraw(None, None);
-            }
-        }
+        // Render the first frame BEFORE showing the window so the user never sees a blank frame.
+        // This eliminates the flash that would occur if ShowWindow displayed an empty buffer.
+        self.render_frame();
 
         unsafe {
             // For label mode, use color-key transparency (like the label overlay in normal mode).
@@ -516,9 +502,6 @@ impl OverlayManager {
             // Take keyboard focus.
             let _ = SetForegroundWindow(self.overlay_hwnds[0]);
         }
-
-        // Render labels immediately after showing the window.
-        self.render_frame();
 
         tracing::info!("Label mode activated with {} windows", windows.len());
     }
