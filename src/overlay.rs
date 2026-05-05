@@ -596,15 +596,6 @@ impl OverlayManager {
                 let _ = ShowWindow(lhwnd, SW_HIDE);
             }
 
-            // Reset to LWA_ALPHA mode (in case we were in label mode with LWA_COLORKEY)
-            // This ensures the next show() will work correctly regardless of which mode was active.
-            let _ = SetLayeredWindowAttributes(
-                self.overlay_hwnds[0],
-                windows::Win32::Foundation::COLORREF(0),
-                0,
-                LWA_ALPHA,
-            );
-
             // Restore primary overlay window to its original size
             // (in case it was resized by label mode)
             if !self.monitors.is_empty() && !self.overlay_hwnds.is_empty() {
