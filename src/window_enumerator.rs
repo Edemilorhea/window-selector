@@ -9,9 +9,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    EnumWindows, GetClassNameW, GetShellWindow, GetWindow, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GWL_EXSTYLE, GW_OWNER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Set of overlay HWNDs to exclude from the window snapshot.
@@ -109,6 +109,13 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         return BOOL(1);
     }
 
+    // Skip windows that have an owner (e.g., dialogs, child windows, background containers)
+    // This matches Windows Alt+Tab behavior and filters out windows like Locu's blank background
+    let owner = GetWindow(hwnd, GW_OWNER);
+    if owner.is_ok() && owner.unwrap().0 != std::ptr::null_mut() {
+        return BOOL(1);
+    }
+
     // Skip tool windows (unless they also have WS_EX_APPWINDOW)
     let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
     let is_tool = (ex_style & WS_EX_TOOLWINDOW.0) != 0;
@@ -117,11 +124,39 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         return BOOL(1);
     }
 
+    // Skip windows with WS_EX_NOACTIVATE (e.g., floating notes, overlay widgets)
+    // These are non-interactive overlays that should not appear in Alt+Tab
+    let is_noactivate = (ex_style & WS_EX_NOACTIVATE.0) != 0;
+    if is_noactivate && !is_app {
+        return BOOL(1);
+    }
+
     // Get window title
     let mut buf = vec![0u16; (title_len as usize) + 1];
     GetWindowTextW(hwnd, &mut buf);
     let title = String::from_utf16_lossy(&buf[..title_len as usize]);
     let exe_path = get_window_exe_path(hwnd);
+
+    // Get window class name for filtering
+    let mut class_buf = vec![0u16; 256];
+    let class_len = GetClassNameW(hwnd, &mut class_buf);
+    let class_name = if class_len > 0 {
+        String::from_utf16_lossy(&class_buf[..class_len as usize])
+    } else {
+        String::new()
+    };
+
+    // Skip known background/desktop window classes
+    let skip_classes = [
+        "Progman",                // Program Manager (desktop)
+        "WorkerW",                // Desktop Worker Window
+        "Shell_TrayWnd",          // Taskbar
+        "Shell_SecondaryTrayWnd", // Secondary taskbar on multi-monitor
+    ];
+
+    if skip_classes.iter().any(|&c| class_name == c) {
+        return BOOL(1);
+    }
 
     let is_minimized = IsIconic(hwnd).as_bool();
 
@@ -298,15 +333,15 @@ mod quick_tag_tests {
 
 /// A simple axis-aligned rectangle used for occlusion calculations.
 #[derive(Clone, Copy, Debug)]
-struct SimpleRect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+pub(crate) struct SimpleRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 impl SimpleRect {
-    fn from_win32(r: &RECT) -> Option<Self> {
+    pub(crate) fn from_win32(r: &RECT) -> Option<Self> {
         if r.right <= r.left || r.bottom <= r.top {
             return None;
         }
@@ -318,7 +353,7 @@ impl SimpleRect {
         })
     }
 
-    fn intersects(&self, other: &Self) -> bool {
+    pub(crate) fn intersects(&self, other: &Self) -> bool {
         self.left < other.right
             && self.right > other.left
             && self.top < other.bottom
@@ -326,7 +361,7 @@ impl SimpleRect {
     }
 
     /// Subtract `other` from `self`, returning the remaining pieces (0-4 sub-rects).
-    fn subtract(&self, other: &Self) -> Vec<Self> {
+    pub(crate) fn subtract(&self, other: &Self) -> Vec<Self> {
         if !self.intersects(other) {
             return vec![*self];
         }
@@ -381,9 +416,9 @@ impl SimpleRect {
 }
 
 /// Z-order snapshot used for occlusion detection.
-struct ZOrderEntry {
-    hwnd: HWND,
-    rect: SimpleRect,
+pub(crate) struct ZOrderEntry {
+    pub hwnd: HWND,
+    pub rect: SimpleRect,
 }
 
 /// Collect all visible, non-minimized windows in Z-order (front to back).
@@ -504,6 +539,17 @@ pub fn filter_occluded_for_label_mode(windows: Vec<WindowInfo>) -> Vec<WindowInf
     let mut filtered = filtered;
     crate::letter_assignment::assign_letters(&mut filtered);
     filtered
+}
+
+/// Collect all visible, non-minimized windows in Z-order (front to back).
+/// Excludes the application's own overlay HWNDs.
+pub(crate) fn collect_z_order_entries() -> Vec<ZOrderEntry> {
+    let mut entries: Vec<ZOrderEntry> = Vec::new();
+    unsafe {
+        let ptr = &mut entries as *mut Vec<ZOrderEntry>;
+        let _ = EnumWindows(Some(z_order_callback), LPARAM(ptr as isize));
+    }
+    entries
 }
 
 /// Check whether the given window would pass the Alt+Tab filter.

@@ -39,6 +39,19 @@ fn default_title_font_size() -> f32 {
 fn default_background_opacity() -> f32 {
     0.86
 }
+fn default_label_overlap_strategy() -> LabelOverlapStrategy {
+    LabelOverlapStrategy::AutoNudge
+}
+
+/// How to handle overlapping labels in label mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelOverlapStrategy {
+    /// Automatically nudge overlapping labels apart (default).
+    AutoNudge,
+    /// Place labels only inside the window's visible (non-occluded) region.
+    VisibleRegion,
+}
 
 /// Persisted application configuration.
 /// Stored at %APPDATA%\window-selector\config.toml
@@ -93,6 +106,11 @@ pub struct AppConfig {
     /// Persistent quick-list tags. Each entry maps number key (1-9) to executable path.
     #[serde(default)]
     pub quick_tags: Vec<QuickTagEntry>,
+
+    /// How to handle overlapping labels in label mode.
+    /// Default: AutoNudge.
+    #[serde(default = "default_label_overlap_strategy")]
+    pub label_overlap_strategy: LabelOverlapStrategy,
 }
 
 impl Default for AppConfig {
@@ -111,6 +129,7 @@ impl Default for AppConfig {
             title_font_size: default_title_font_size(),
             background_opacity: default_background_opacity(),
             quick_tags: Vec::new(),
+            label_overlap_strategy: default_label_overlap_strategy(),
         }
     }
 }
@@ -255,6 +274,7 @@ mod tests {
                 number: 1,
                 exe_path: String::from(r"C:\\Windows\\System32\\notepad.exe"),
             }],
+            label_overlap_strategy: LabelOverlapStrategy::VisibleRegion,
         };
         AppConfig::save(&dir, &original).expect("save should succeed");
         let loaded = AppConfig::load(&dir).expect("load should succeed");
@@ -268,6 +288,7 @@ mod tests {
         assert!((loaded.title_font_size - original.title_font_size).abs() < 0.001);
         assert!((loaded.background_opacity - original.background_opacity).abs() < 0.001);
         assert_eq!(loaded.quick_tags, original.quick_tags);
+        assert_eq!(loaded.label_overlap_strategy, original.label_overlap_strategy);
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }
@@ -319,6 +340,7 @@ mod tests {
         assert!(!config.launch_at_startup);
         assert!(!config.direct_switch);
         assert!(config.quick_tags.is_empty());
+        assert_eq!(config.label_overlap_strategy, LabelOverlapStrategy::AutoNudge);
     }
 
     #[test]
@@ -391,6 +413,28 @@ mod tests {
             validated.quick_tags, original.quick_tags,
             "validate() must not change default quick_tags"
         );
+        assert_eq!(validated.overlay_opacity, original.overlay_opacity,
+            "validate() must not change default overlay_opacity");
+        assert_eq!(validated.fade_duration_ms, original.fade_duration_ms,
+            "validate() must not change default fade_duration_ms");
+        assert!((validated.grid_padding - original.grid_padding).abs() < 0.001,
+            "validate() must not change default grid_padding");
+        assert!((validated.label_font_size - original.label_font_size).abs() < 0.001,
+            "validate() must not change default label_font_size");
+        assert!((validated.title_font_size - original.title_font_size).abs() < 0.001,
+            "validate() must not change default title_font_size");
+        assert!((validated.background_opacity - original.background_opacity).abs() < 0.001,
+            "validate() must not change default background_opacity");
+        assert_eq!(validated.hotkey_modifiers, original.hotkey_modifiers,
+            "validate() must not change default hotkey_modifiers");
+        assert_eq!(validated.hotkey_vk, original.hotkey_vk,
+            "validate() must not change default hotkey_vk");
+        assert_eq!(validated.direct_switch, original.direct_switch,
+            "validate() must not change default direct_switch");
+        assert_eq!(validated.launch_at_startup, original.launch_at_startup,
+            "validate() must not change default launch_at_startup");
+        assert_eq!(validated.label_overlap_strategy, original.label_overlap_strategy,
+            "validate() must not change default label_overlap_strategy");
     }
 
     #[test]

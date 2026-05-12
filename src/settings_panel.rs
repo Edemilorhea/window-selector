@@ -5,7 +5,7 @@
 ///
 /// The settings window is a top-level WS_OVERLAPPEDWINDOW (no resize, no maximize).
 /// It appears in the taskbar via WS_EX_APPWINDOW.
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LabelOverlapStrategy};
 use crate::keycodes::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_CONTROL, VK_ESCAPE, VK_LCONTROL,
     VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
@@ -46,7 +46,7 @@ impl Drop for HookGuard {
 /// Fixed logical size of the settings window in physical pixels.
 /// Scaled by DPI at creation time.
 const SETTINGS_WIDTH_BASE: i32 = 480;
-const SETTINGS_HEIGHT_BASE: i32 = 600;
+const SETTINGS_HEIGHT_BASE: i32 = 680;
 
 /// Global pointer to the active SettingsPanelManager.
 /// Only valid while the settings panel is open (non-null).
@@ -93,6 +93,8 @@ pub struct SettingsPanelManager {
     direct_switch: bool,
     /// Cached launch_at_startup state for the toggle.
     launch_at_startup: bool,
+    /// Cached label overlap strategy.
+    label_overlap_strategy: LabelOverlapStrategy,
     /// Cached slider values (populated from config on open).
     slider_values: [f32; 6],
 }
@@ -110,6 +112,7 @@ impl SettingsPanelManager {
             label_hotkey_error: String::new(),
             direct_switch: false,
             launch_at_startup: false,
+            label_overlap_strategy: LabelOverlapStrategy::AutoNudge,
             slider_values: [220.0, 0.86, 150.0, 16.0, 18.0, 13.0],
         }
     }
@@ -253,6 +256,7 @@ impl SettingsPanelManager {
             let app = &*app_ptr;
             self.direct_switch = app.config.direct_switch;
             self.launch_at_startup = crate::startup::get_launch_at_startup();
+            self.label_overlap_strategy = app.config.label_overlap_strategy;
             self.slider_values = [
                 app.config.overlay_opacity as f32,
                 app.config.background_opacity,
@@ -300,6 +304,7 @@ impl SettingsPanelManager {
             slider_values: self.slider_values,
             direct_switch: self.direct_switch,
             launch_at_startup: self.launch_at_startup,
+            label_overlap_strategy: self.label_overlap_strategy,
         }
     }
 
@@ -330,6 +335,18 @@ impl SettingsPanelManager {
             // Check launch_at_startup toggle
             if PtInRect(&rects.launch_at_startup_toggle, pt).as_bool() {
                 self.toggle_launch_at_startup();
+                return;
+            }
+
+            // Check label overlap strategy: AutoNudge
+            if PtInRect(&rects.label_overlap_nudge, pt).as_bool() {
+                self.set_label_overlap_strategy(LabelOverlapStrategy::AutoNudge);
+                return;
+            }
+
+            // Check label overlap strategy: VisibleRegion
+            if PtInRect(&rects.label_overlap_visible, pt).as_bool() {
+                self.set_label_overlap_strategy(LabelOverlapStrategy::VisibleRegion);
                 return;
             }
 
@@ -454,6 +471,23 @@ impl SettingsPanelManager {
                 Err(e) => {
                     tracing::error!("set_launch_at_startup({}) failed: {:?}", new_val, e);
                 }
+            }
+        }
+        self.invalidate();
+    }
+
+    /// Set the label overlap strategy and save.
+    fn set_label_overlap_strategy(&mut self, strategy: LabelOverlapStrategy) {
+        let app_ptr = crate::get_app_state_pub();
+        if app_ptr.is_null() {
+            return;
+        }
+        unsafe {
+            let app = &mut *app_ptr;
+            app.config.label_overlap_strategy = strategy;
+            self.label_overlap_strategy = strategy;
+            if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
+                tracing::error!("Failed to save config after label overlap change: {}", e);
             }
         }
         self.invalidate();

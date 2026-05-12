@@ -1,5 +1,7 @@
 use crate::accent_color::AccentColor;
+use crate::config::LabelOverlapStrategy;
 use crate::grid_layout::{CellRect, QUICK_LIST_BAR_HEIGHT};
+use crate::window_enumerator::{collect_z_order_entries, SimpleRect};
 use crate::window_info::WindowInfo;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -660,11 +662,13 @@ impl OverlayRenderer {
         windows: &[WindowInfo],
         selected: Option<usize>,
         overlay_hwnd: HWND,
+        strategy: LabelOverlapStrategy,
     ) {
         tracing::info!(
-            "render_labels_only: {} windows, selected={:?}",
+            "render_labels_only: {} windows, selected={:?}, strategy={:?}",
             windows.len(),
-            selected
+            selected,
+            strategy
         );
 
         // Get overlay window position (top-left corner in screen coordinates)
@@ -684,6 +688,16 @@ impl OverlayRenderer {
             overlay_offset.1
         );
 
+        // Pre-calculate label positions based on the chosen strategy
+        let label_positions = match strategy {
+            LabelOverlapStrategy::AutoNudge => {
+                calculate_label_positions_auto_nudge(windows, overlay_offset)
+            }
+            LabelOverlapStrategy::VisibleRegion => {
+                calculate_label_positions_visible_region(windows, overlay_offset)
+            }
+        };
+
         unsafe {
             self.render_target.BeginDraw();
 
@@ -695,15 +709,17 @@ impl OverlayRenderer {
             // Draw a label for each window
             for (i, window) in windows.iter().enumerate() {
                 let is_selected = selected == Some(i);
-                tracing::debug!(
-                    "Drawing label for window {}: {:?}, letter={:?}, minimized={}, selected={}",
-                    i,
-                    window.hwnd,
-                    window.letter,
-                    window.is_minimized,
-                    is_selected
-                );
-                self.draw_label_for_window(window, is_selected, overlay_offset);
+                if let Some((label_x, label_y)) = label_positions.get(i).copied().flatten() {
+                    tracing::debug!(
+                        "Drawing label for window {}: {:?}, letter={:?}, minimized={}, selected={}",
+                        i,
+                        window.hwnd,
+                        window.letter,
+                        window.is_minimized,
+                        is_selected
+                    );
+                    self.draw_label_for_window_at(window, is_selected, label_x, label_y);
+                }
             }
 
             if let Err(e) = self.render_target.EndDraw(None, None) {
@@ -712,54 +728,15 @@ impl OverlayRenderer {
         }
     }
 
-    /// Draw a single label above a window's title bar.
-    ///
-    /// `overlay_offset` is the (left, top) position of the overlay window in screen coordinates.
-    fn draw_label_for_window(
+    /// Draw a single label at the given overlay client coordinates.
+    fn draw_label_for_window_at(
         &self,
         window: &WindowInfo,
         is_selected: bool,
-        overlay_offset: (i32, i32),
+        label_x: f32,
+        label_y: f32,
     ) {
         unsafe {
-            // Get window rectangle (absolute screen coordinates)
-            let mut window_rect = RECT::default();
-            if GetWindowRect(window.hwnd, &mut window_rect).is_err() {
-                tracing::warn!("Failed to get window rect for {:?}", window.hwnd);
-                return;
-            }
-
-            tracing::debug!(
-                "Window rect for {:?}: left={}, top={}, right={}, bottom={}",
-                window.hwnd,
-                window_rect.left,
-                window_rect.top,
-                window_rect.right,
-                window_rect.bottom
-            );
-
-            // Skip minimized windows (they don't have visible title bars)
-            if window.is_minimized {
-                tracing::debug!("Skipping minimized window {:?}", window.hwnd);
-                return;
-            }
-
-            // Calculate label position (in screen coordinates)
-            let (screen_x, screen_y) = calculate_label_position(&window_rect);
-
-            // Convert to overlay client coordinates
-            let label_x = screen_x - overlay_offset.0 as f32;
-            let label_y = screen_y - overlay_offset.1 as f32;
-
-            tracing::debug!(
-                "Label position for {:?}: screen=({}, {}), client=({}, {}), letter={:?}",
-                window.hwnd,
-                screen_x,
-                screen_y,
-                label_x,
-                label_y,
-                window.letter
-            );
 
             // Label dimensions
             let label_w = LABEL_MODE_WIDTH;
@@ -868,4 +845,161 @@ fn calculate_label_position(window_rect: &RECT) -> (f32, f32) {
 
         (label_x, label_y)
     }
+}
+
+/// Calculate label positions using the AutoNudge strategy.
+/// Overlapping labels are pushed diagonally (right + down) until they no longer collide.
+/// Returns a Vec of Option<(x, y)> in overlay client coordinates.
+fn calculate_label_positions_auto_nudge(
+    windows: &[WindowInfo],
+    overlay_offset: (i32, i32),
+) -> Vec<Option<(f32, f32)>> {
+    let mut placed: Vec<((f32, f32), (f32, f32))> = Vec::new();
+    let mut result: Vec<Option<(f32, f32)>> = Vec::with_capacity(windows.len());
+
+    for window in windows {
+        if window.is_minimized {
+            result.push(None);
+            continue;
+        }
+
+        let mut window_rect = RECT::default();
+        let base_pos = unsafe {
+            if GetWindowRect(window.hwnd, &mut window_rect).is_err() {
+                result.push(None);
+                continue;
+            }
+            calculate_label_position(&window_rect)
+        };
+
+        let mut label_x = base_pos.0 - overlay_offset.0 as f32;
+        let mut label_y = base_pos.1 - overlay_offset.1 as f32;
+        let label_w = LABEL_MODE_WIDTH;
+        let label_h = LABEL_MODE_HEIGHT;
+
+        // Max nudge: don't push more than 80% of the window width
+        let window_w = (window_rect.right - window_rect.left) as f32;
+        let max_nudge_x = (window_w * 0.8).max(label_w * 2.0);
+        let max_nudge_y = (window_rect.bottom - window_rect.top) as f32 * 0.8;
+
+        // Nudge step size
+        const NUDGE_STEP: f32 = 20.0;
+        const MAX_ITERATIONS: usize = 50;
+
+        for _ in 0..MAX_ITERATIONS {
+            let collides = placed.iter().any(|((px1, py1), (px2, py2))| {
+                label_x < *px2 && label_x + label_w > *px1 &&
+                label_y < *py2 && label_y + label_h > *py1
+            });
+
+            if !collides {
+                break;
+            }
+
+            // Nudge diagonally right+down
+            label_x += NUDGE_STEP;
+            label_y += NUDGE_STEP;
+
+            // Stop if we've nudged too far
+            if label_x - (base_pos.0 - overlay_offset.0 as f32) > max_nudge_x ||
+               label_y - (base_pos.1 - overlay_offset.1 as f32) > max_nudge_y {
+                // Give up and use the last position (may still overlap, but that's the best we can do)
+                break;
+            }
+        }
+
+        placed.push(((label_x, label_y), (label_x + label_w, label_y + label_h)));
+        result.push(Some((label_x, label_y)));
+    }
+
+    result
+}
+
+/// Calculate label positions using the VisibleRegion strategy.
+/// Labels are placed inside the largest visible (non-occluded) rectangle of each window.
+/// Returns a Vec of Option<(x, y)> in overlay client coordinates.
+fn calculate_label_positions_visible_region(
+    windows: &[WindowInfo],
+    overlay_offset: (i32, i32),
+) -> Vec<Option<(f32, f32)>> {
+    // Collect Z-order for occlusion calculations
+    let z_order = collect_z_order_entries();
+
+    let mut result: Vec<Option<(f32, f32)>> = Vec::with_capacity(windows.len());
+
+    for window in windows {
+        if window.is_minimized {
+            result.push(None);
+            continue;
+        }
+
+        let mut window_rect = RECT::default();
+        let simple_rect = unsafe {
+            if GetWindowRect(window.hwnd, &mut window_rect).is_err() {
+                result.push(None);
+                continue;
+            }
+            match SimpleRect::from_win32(&window_rect) {
+                Some(r) => r,
+                None => {
+                    result.push(None);
+                    continue;
+                }
+            }
+        };
+
+        // Find this window's position in Z-order
+        let pos = match z_order.iter().position(|e| e.hwnd == window.hwnd) {
+            Some(p) => p,
+            None => {
+                // Not in Z-order → assume fully visible, use default position
+                let (sx, sy) = calculate_label_position(&window_rect);
+                result.push(Some((
+                    sx - overlay_offset.0 as f32,
+                    sy - overlay_offset.1 as f32,
+                )));
+                continue;
+            }
+        };
+
+        // Calculate visible region by subtracting all higher Z-order windows
+        let mut visible: Vec<SimpleRect> = vec![simple_rect];
+        for occluder in &z_order[..pos] {
+            if visible.is_empty() {
+                break;
+            }
+            visible = visible
+                .iter()
+                .flat_map(|r| r.subtract(&occluder.rect))
+                .collect();
+        }
+
+        if visible.is_empty() {
+            // Fully occluded — skip this window
+            result.push(None);
+            continue;
+        }
+
+        // Find the largest visible rectangle by area
+        let best_rect = visible
+            .iter()
+            .max_by_key(|r| {
+                let area = (r.right - r.left) * (r.bottom - r.top);
+                area
+            })
+            .copied()
+            .unwrap_or(simple_rect);
+
+        // Place label inside the best visible rectangle with padding
+        let padding = 8.0_f32;
+        let label_x = (best_rect.left as f32 + padding).min(best_rect.right as f32 - LABEL_MODE_WIDTH - padding);
+        let label_y = (best_rect.top as f32 + padding).min(best_rect.bottom as f32 - LABEL_MODE_HEIGHT - padding);
+
+        result.push(Some((
+            label_x - overlay_offset.0 as f32,
+            label_y - overlay_offset.1 as f32,
+        )));
+    }
+
+    result
 }
