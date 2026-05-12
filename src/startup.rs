@@ -38,10 +38,8 @@ pub fn set_launch_at_startup(enabled: bool) -> windows::core::Result<()> {
 
         let result = if enabled {
             let exe_path = get_exe_path_quoted();
-            let exe_path_wide: Vec<u16> = exe_path
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let exe_path_wide: Vec<u16> =
+                exe_path.encode_utf16().chain(std::iter::once(0)).collect();
             let data_bytes: &[u8] = std::slice::from_raw_parts(
                 exe_path_wide.as_ptr() as *const u8,
                 exe_path_wide.len() * 2,
@@ -225,8 +223,14 @@ mod tests {
     fn test_exe_path_quoting_with_spaces() {
         let path = "C:\\Program Files\\My App\\app.exe";
         let quoted = quote_if_spaces(path);
-        assert!(quoted.starts_with('"'), "Path with spaces should start with quote");
-        assert!(quoted.ends_with('"'), "Path with spaces should end with quote");
+        assert!(
+            quoted.starts_with('"'),
+            "Path with spaces should start with quote"
+        );
+        assert!(
+            quoted.ends_with('"'),
+            "Path with spaces should end with quote"
+        );
         assert_eq!(quoted, format!("\"{}\"", path));
     }
 
@@ -236,7 +240,10 @@ mod tests {
         let path = "C:\\Program Files\\My App\\app.exe";
         let quoted = quote_if_spaces(path);
         let unquoted = quoted.trim_matches('"');
-        assert_eq!(unquoted, path, "Stripping quotes should recover original path");
+        assert_eq!(
+            unquoted, path,
+            "Stripping quotes should recover original path"
+        );
     }
 
     // TC-3.1 (registry): get_launch_at_startup() returns false when key is absent.
@@ -249,6 +256,9 @@ mod tests {
         let _ = set_launch_at_startup(false);
         // Now check — must return false since we just removed it.
         let result = get_launch_at_startup();
-        assert!(!result, "get_launch_at_startup() must return false when key is absent");
+        assert!(
+            !result,
+            "get_launch_at_startup() must return false when key is absent"
+        );
     }
 }

@@ -6,7 +6,7 @@ A fast, keyboard-driven Alt+Tab replacement for Windows. Press a hotkey to see l
 
 - **Live DWM Thumbnails** — Real-time window previews rendered by the Desktop Window Manager, not static screenshots.
 - **Keyboard-First Navigation** — Each window is assigned a home-row-first letter (A, S, D, F, G, H, J, K, ...). Press the letter to select, Enter/Space to switch.
-- **Number Tagging** — Pin frequently used windows with Ctrl+1 through Ctrl+9. Press the number key to jump back instantly.
+- **Number Tagging** — Pin frequently used apps with Ctrl+1 through Ctrl+9. Tags persist across app restarts and resolve to the most recently used matching window.
 - **Quick List Bar** — A compact strip at the bottom of the overlay showing all windows with their letter, number tag, and title at a glance.
 - **Multi-Monitor Support** — Overlay spans all connected monitors with per-monitor grid layout.
 - **MRU Ordering** — Windows are sorted by most-recently-used order, tracked in real time via a WinEvent hook.
@@ -48,8 +48,8 @@ The application starts minimized to the system tray. Press the activation hotkey
 | Select a window | Press the letter shown on its thumbnail/label |
 | Switch to selected window | Enter or Space |
 | Dismiss overlay | Escape |
-| Tag a window with a number | Ctrl+1 through Ctrl+9 (while a window is selected) |
-| Jump to a tagged window | 1 through 9 |
+| Tag a window's app with a number | Ctrl+1 through Ctrl+9 (while a window is selected) |
+| Jump to the tagged app | 1 through 9 |
 
 ### Letter Assignment
 
@@ -73,6 +73,10 @@ hotkey_modifiers = 16387   # MOD_WIN | MOD_NOREPEAT
 hotkey_vk = 81             # VK_Q (Ctrl+Alt+Q for overlay)
 label_hotkey_modifiers = 16387   # MOD_WIN | MOD_NOREPEAT
 label_hotkey_vk = 89             # VK_Y (Win+Y for label mode)
+
+[[quick_tags]]
+number = 1
+exe_path = 'C:\\Windows\\System32\\notepad.exe'
 ```
 
 Logs are written to `%APPDATA%\window-selector\logs\`.

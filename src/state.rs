@@ -52,8 +52,8 @@ impl OverlayState {
     }
 }
 
-/// Session-only number tag store. Maps tag number (1-9) to window handle.
-/// Persists across overlay show/hide cycles within the process session.
+/// Runtime-resolved number tag store. Maps tag number (1-9) to the current window handle
+/// chosen for that tag in this process session.
 pub struct SessionTags {
     tags: HashMap<u8, HWND>,
 }
@@ -89,6 +89,11 @@ impl SessionTags {
     /// Remove the tag for a specific HWND.
     pub fn remove_by_hwnd(&mut self, hwnd: HWND) {
         self.tags.retain(|_, h| *h != hwnd);
+    }
+
+    /// Remove the current binding for a specific tag number.
+    pub fn remove(&mut self, number: u8) {
+        self.tags.remove(&number);
     }
 
     /// Return all current tag assignments as a sorted Vec.

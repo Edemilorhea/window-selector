@@ -1,11 +1,17 @@
+use crate::config::QuickTagEntry;
 use crate::mru_tracker::MruTracker;
+use crate::state::SessionTags;
 use crate::window_info::WindowInfo;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetShellWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowRect, IsIconic, IsWindowVisible, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    EnumWindows, GetShellWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 /// Set of overlay HWNDs to exclude from the window snapshot.
@@ -115,6 +121,7 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
     let mut buf = vec![0u16; (title_len as usize) + 1];
     GetWindowTextW(hwnd, &mut buf);
     let title = String::from_utf16_lossy(&buf[..title_len as usize]);
+    let exe_path = get_window_exe_path(hwnd);
 
     let is_minimized = IsIconic(hwnd).as_bool();
 
@@ -126,8 +133,10 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         .position(|m| m.handle == monitor_handle)
         .unwrap_or(0);
 
-    ctx.windows
-        .push(WindowInfo::new(hwnd, title, is_minimized, monitor_index));
+    ctx.windows.push(WindowInfo {
+        exe_path,
+        ..WindowInfo::new(hwnd, title, is_minimized, monitor_index)
+    });
 
     BOOL(1) // Continue enumeration
 }
@@ -137,7 +146,6 @@ pub fn snapshot_windows(
     own_hwnds: &[HWND],
     monitors: &[crate::monitor::MonitorInfo],
     mru_tracker: &MruTracker,
-    session_tags: &crate::state::SessionTags,
 ) -> Vec<WindowInfo> {
     let mut windows = enumerate_windows(own_hwnds, monitors);
 
@@ -147,10 +155,9 @@ pub fn snapshot_windows(
     // Assign letters
     crate::letter_assignment::assign_letters(&mut windows);
 
-    // Re-apply session tags and fetch each window's icon once.
+    // Fetch each window's icon once.
     // Caching here avoids sending WM_GETICON on every WM_PAINT repaint.
     for window in &mut windows {
-        window.number_tag = session_tags.get_tag_for_hwnd(window.hwnd);
         window.icon = crate::window_icon::get_window_icon(window.hwnd);
     }
 
@@ -167,6 +174,122 @@ pub fn snapshot_windows(
     }
 
     windows
+}
+
+/// Resolve persistent quick-list tags to the best current HWNDs.
+///
+/// `windows` must already be sorted by MRU order so the first matching window for an
+/// executable path is the best active candidate for that tag.
+pub fn resolve_quick_tags(windows: &mut [WindowInfo], quick_tags: &[QuickTagEntry]) -> SessionTags {
+    for window in windows.iter_mut() {
+        window.number_tag = None;
+    }
+
+    let mut resolved = SessionTags::new();
+    for entry in quick_tags {
+        if let Some(window) = windows.iter_mut().find(|window| {
+            window
+                .exe_path
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&entry.exe_path))
+        }) {
+            window.number_tag = Some(entry.number);
+            resolved.assign(entry.number, window.hwnd);
+        }
+    }
+
+    resolved
+}
+
+fn get_window_exe_path(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        if process_id == 0 {
+            return None;
+        }
+
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let mut buffer = vec![0u16; 32768];
+        let mut size = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = windows::Win32::Foundation::CloseHandle(process);
+        if result.is_err() || size == 0 {
+            return None;
+        }
+
+        Some(String::from_utf16_lossy(&buffer[..size as usize]))
+    }
+}
+
+#[cfg(test)]
+mod quick_tag_tests {
+    use super::*;
+
+    fn hwnd(n: isize) -> HWND {
+        HWND(n as *mut _)
+    }
+
+    fn make_window(hwnd_n: isize, exe_path: &str) -> WindowInfo {
+        WindowInfo {
+            exe_path: Some(exe_path.to_string()),
+            ..WindowInfo::new(hwnd(hwnd_n), format!("Window {}", hwnd_n), false, 0)
+        }
+    }
+
+    #[test]
+    fn test_resolve_quick_tags_matches_executable_path() {
+        let mut windows = vec![
+            make_window(1, r"C:\Program Files\App\app.exe"),
+            make_window(2, r"C:\Windows\System32\notepad.exe"),
+        ];
+        let quick_tags = vec![QuickTagEntry {
+            number: 1,
+            exe_path: String::from(r"C:\Windows\System32\notepad.exe"),
+        }];
+
+        let resolved = resolve_quick_tags(&mut windows, &quick_tags);
+
+        assert_eq!(resolved.get(1), Some(hwnd(2)));
+        assert_eq!(windows[1].number_tag, Some(1));
+    }
+
+    #[test]
+    fn test_resolve_quick_tags_uses_mru_order_for_same_app() {
+        let mut windows = vec![
+            make_window(1, r"C:\Program Files\App\app.exe"),
+            make_window(2, r"C:\Program Files\App\app.exe"),
+        ];
+        let quick_tags = vec![QuickTagEntry {
+            number: 3,
+            exe_path: String::from(r"C:\Program Files\App\app.exe"),
+        }];
+
+        let resolved = resolve_quick_tags(&mut windows, &quick_tags);
+
+        assert_eq!(resolved.get(3), Some(hwnd(1)));
+        assert_eq!(windows[0].number_tag, Some(3));
+        assert_eq!(windows[1].number_tag, None);
+    }
+
+    #[test]
+    fn test_resolve_quick_tags_leaves_unmatched_tags_unresolved() {
+        let mut windows = vec![make_window(1, r"C:\Program Files\App\app.exe")];
+        let quick_tags = vec![QuickTagEntry {
+            number: 9,
+            exe_path: String::from(r"C:\Windows\System32\notepad.exe"),
+        }];
+
+        let resolved = resolve_quick_tags(&mut windows, &quick_tags);
+
+        assert_eq!(resolved.get(9), None);
+        assert_eq!(windows[0].number_tag, None);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +425,11 @@ unsafe extern "system" fn z_order_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
 /// Returns `true` if `candidate` is fully covered by the windows that are strictly
 /// higher in Z-order (earlier in `z_order`).
-fn is_fully_occluded(candidate_hwnd: HWND, candidate_rect: SimpleRect, z_order: &[ZOrderEntry]) -> bool {
+fn is_fully_occluded(
+    candidate_hwnd: HWND,
+    candidate_rect: SimpleRect,
+    z_order: &[ZOrderEntry],
+) -> bool {
     // Find the candidate's position in Z-order
     let pos = match z_order.iter().position(|e| e.hwnd == candidate_hwnd) {
         Some(p) => p,

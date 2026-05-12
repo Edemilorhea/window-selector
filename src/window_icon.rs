@@ -17,15 +17,15 @@
 /// Returns `None` if no icon is available (caller should skip drawing).
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassLongPtrW, SendMessageTimeoutW, GCLP_HICON, GCLP_HICONSM, HICON,
-    SMTO_ABORTIFHUNG, SMTO_BLOCK, WM_GETICON,
+    GetClassLongPtrW, SendMessageTimeoutW, GCLP_HICON, GCLP_HICONSM, HICON, SMTO_ABORTIFHUNG,
+    SMTO_BLOCK, WM_GETICON,
 };
 
 // WM_GETICON wParam constants from WinUser.h.
 // The `windows` crate exposes these as ICON_TYPE, but using plain integer
 // literals via WPARAM is the simplest cross-version approach.
 const ICON_SMALL_WPARAM: usize = 0; // ICON_SMALL
-const ICON_BIG_WPARAM: usize = 1;   // ICON_BIG
+const ICON_BIG_WPARAM: usize = 1; // ICON_BIG
 const ICON_SMALL2_WPARAM: usize = 2; // ICON_SMALL2 — DPI-aware small icon
 
 /// Attempt to retrieve a suitable HICON for the given window.

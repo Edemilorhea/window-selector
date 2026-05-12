@@ -640,12 +640,15 @@ impl OverlayManager {
     /// This must be called while the overlay is **hidden**; callers must dismiss the
     /// overlay before invoking this method.
     pub fn on_display_change(&mut self, new_monitors: Vec<MonitorInfo>) {
-        self.monitors = new_monitors;
-
-        if self.monitors.is_empty() {
-            tracing::warn!("on_display_change: no monitors reported");
+        // Validate before overwriting existing state: a transient empty list
+        // (possible mid-resolution-change) must not wipe out the previously
+        // known monitor geometry, or later hide paths that depend on
+        // `self.monitors[0]` will silently skip their work.
+        if new_monitors.is_empty() {
+            tracing::warn!("on_display_change: no monitors reported, keeping previous monitor list");
             return;
         }
+        self.monitors = new_monitors;
 
         unsafe {
             // Resize/reposition each per-monitor thumbnail overlay HWND.

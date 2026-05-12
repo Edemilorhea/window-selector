@@ -60,11 +60,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_MESSAGE, MSG, WA_INACTIVE, WM_ACTIVATE,
     WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_PAINT, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_OVERLAPPEDWINDOW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 const MSG_WINDOW_CLASS: &str = "WindowSelectorMsgWnd\0";
 const MSG_WINDOW_NAME: &str = "Window Selector\0";
+/// Window class for the broadcast-receiver window.
+///
+/// `WM_DISPLAYCHANGE` (and other system broadcasts) are sent to top-level windows
+/// only — they are NOT delivered to `HWND_MESSAGE` windows.  This separate class is
+/// registered for a 0×0 `WS_POPUP` window whose sole purpose is to receive those
+/// broadcasts and forward them to the application logic.
+const BROADCAST_WINDOW_CLASS: &str = "WindowSelectorBroadcastWnd\0";
 
 /// Application state owned by the single message pump thread.
 #[allow(dead_code)]
@@ -78,6 +85,12 @@ pub(crate) struct AppState {
     pub(crate) previous_foreground: Option<HWND>,
     pub(crate) window_snapshot: Vec<window_info::WindowInfo>,
     pub(crate) msg_hwnd: HWND,
+    /// Hidden top-level 0×0 window whose only job is to receive system
+    /// broadcast messages (e.g. `WM_DISPLAYCHANGE`).  `HWND_MESSAGE` windows
+    /// are excluded from the broadcast list, so `msg_hwnd` never sees those
+    /// messages.  This window uses `main_wndproc` and is kept alive for the
+    /// lifetime of the message loop.
+    pub(crate) broadcast_hwnd: HWND,
     pub(crate) settings_panel: settings_panel::SettingsPanelManager,
 }
 
@@ -250,6 +263,56 @@ unsafe fn run_message_loop(config: AppConfig, config_dir: std::path::PathBuf) {
 
     tracing::info!("Message window HWND={:?}", msg_hwnd);
 
+    // Create a dedicated top-level broadcast-receiver window.
+    //
+    // WHY: `HWND_MESSAGE` windows are excluded from the Windows broadcast
+    // list, so `msg_hwnd` (created above with `HWND_MESSAGE` as parent) never
+    // receives `WM_DISPLAYCHANGE` or other system-wide broadcast messages.
+    // A plain `WS_POPUP` top-level window with no parent receives all
+    // broadcasts.  This 0×0 invisible window handles those messages and
+    // dispatches them through `main_wndproc` just like `msg_hwnd` does.
+    let broadcast_class_name: Vec<u16> = BROADCAST_WINDOW_CLASS.encode_utf16().collect();
+    let broadcast_wc = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES(0),
+        lpfnWndProc: Some(main_wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance.into(),
+        hIcon: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
+        hCursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR::default(),
+        hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH::default(),
+        lpszMenuName: PCWSTR::null(),
+        lpszClassName: PCWSTR(broadcast_class_name.as_ptr()),
+        hIconSm: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
+    };
+    if RegisterClassExW(&broadcast_wc) == 0 {
+        tracing::warn!("RegisterClassExW (broadcast window) failed — WM_DISPLAYCHANGE will not work");
+    }
+    let broadcast_hwnd = match CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        PCWSTR(broadcast_class_name.as_ptr()),
+        PCWSTR::null(),
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        None, // no parent — must be a real top-level window to receive broadcasts
+        HMENU::default(),
+        instance,
+        None,
+    ) {
+        Ok(h) => {
+            tracing::info!("Broadcast-receiver window HWND={:?}", h);
+            h
+        }
+        Err(e) => {
+            tracing::warn!("CreateWindowExW (broadcast window) failed: {:?} — WM_DISPLAYCHANGE will not work", e);
+            HWND::default()
+        }
+    };
+
     // Initialize AppState on the heap so we can take a stable pointer.
     let mut app_state = Box::new(AppState {
         config: config.clone(),
@@ -261,6 +324,7 @@ unsafe fn run_message_loop(config: AppConfig, config_dir: std::path::PathBuf) {
         previous_foreground: None,
         window_snapshot: Vec::new(),
         msg_hwnd,
+        broadcast_hwnd,
         settings_panel: settings_panel::SettingsPanelManager::new(),
     });
 

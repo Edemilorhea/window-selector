@@ -171,8 +171,10 @@ impl OverlayRenderer {
 
             // Create brushes — refined dark palette with subtle cool tint
             // background_opacity is the initial alpha; it is updated per-frame via SetColor().
-            let backdrop_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.02, 0.03, 0.06, config.background_opacity), None)?;
+            let backdrop_brush = render_target.CreateSolidColorBrush(
+                &d2d_color(0.02, 0.03, 0.06, config.background_opacity),
+                None,
+            )?;
             let cell_bg_brush =
                 render_target.CreateSolidColorBrush(&d2d_color(0.07, 0.08, 0.12, 0.95), None)?;
             let cell_border_brush =
