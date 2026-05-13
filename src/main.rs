@@ -38,7 +38,7 @@ use tray::{
     MENU_SETTINGS, WM_TRAY_CALLBACK,
 };
 use window_enumerator::{
-    filter_occluded_for_label_mode, register_overlay_hwnds, resolve_quick_tags, snapshot_windows,
+    filter_occluded_for_label_mode, refresh_quick_tags, register_overlay_hwnds, snapshot_windows,
 };
 use window_switcher::{restore_focus, switch_to_window};
 
@@ -766,7 +766,7 @@ unsafe fn activate_overlay(app: &mut AppState) {
         &mon_clone,
         &app.mru_tracker,
     );
-    app.session_tags = resolve_quick_tags(&mut app.window_snapshot, &app.config.quick_tags);
+    refresh_quick_tags(&mut app.window_snapshot, &app.config.quick_tags, &mut app.session_tags);
 
     tracing::info!("Activating overlay: {} windows", app.window_snapshot.len());
 
@@ -830,7 +830,7 @@ unsafe fn activate_label_mode(app: &mut AppState) {
         &mon_clone,
         &app.mru_tracker,
     );
-    app.session_tags = resolve_quick_tags(&mut raw_snapshot, &app.config.quick_tags);
+    refresh_quick_tags(&mut raw_snapshot, &app.config.quick_tags, &mut app.session_tags);
 
     // Filter out windows that are fully occluded by higher-Z-order windows.
     // These would only add invisible labels that confuse the user.
@@ -964,6 +964,7 @@ unsafe fn handle_overlay_key(vk_code: u32) {
             // Both modes use the same hide mechanism
             app.overlay_manager
                 .begin_hide(&mut app.overlay_state, Some(target));
+            app.previous_foreground = None;
         }
         KeyAction::Dismiss => {
             if is_label_mode {
@@ -1051,18 +1052,21 @@ unsafe fn handle_fade_timer(app: &mut AppState) {
                 tracing::info!("Fade-in complete");
             }
             OverlayState::FadingOut { switch_target } => {
-                app.overlay_manager.hide_windows();
-                app.overlay_state = OverlayState::Hidden;
-
-                keyboard_hook::set_active(false);
-
+                // Switch before hiding — we still hold the foreground lock at this point.
+                // Calling hide_windows() first would transfer the foreground back to the
+                // previous window, causing SetForegroundWindow to fail for the target.
                 if let Some(target) = switch_target {
                     let _ = switch_to_window(target);
-                } else if let Some(prev) = app.previous_foreground {
-                    let _ = restore_focus(prev);
+                }
+                app.overlay_manager.hide_windows();
+                app.overlay_state = OverlayState::Hidden;
+                keyboard_hook::set_active(false);
+                if switch_target.is_none() {
+                    if let Some(prev) = app.previous_foreground {
+                        let _ = restore_focus(prev);
+                    }
                 }
                 app.previous_foreground = None;
-
                 tracing::debug!("Fade-out complete");
             }
             _ => {}

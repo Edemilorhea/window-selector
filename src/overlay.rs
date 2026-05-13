@@ -511,9 +511,15 @@ impl OverlayManager {
             return;
         }
 
-        // Skip fade-out — hide immediately.
+        // Set state to Hidden FIRST. Two constraints require this ordering:
+        // (1) Re-entrancy: SetForegroundWindow sends WM_ACTIVATE(WA_INACTIVE) synchronously
+        //     on the same thread; the handler calls dismiss_overlay if state is Active,
+        //     which would restore the previous foreground instead of the intended target.
+        // (2) Black-flash: target window must be foreground before hide_windows() so the
+        //     desktop compositor has something to show on the monitor with no black gap.
+        *state = OverlayState::Hidden;
 
-        // Deactivate keyboard hook FIRST (before switching windows)
+        // Deactivate keyboard hook BEFORE switching windows
         crate::keyboard_hook::set_active(false);
 
         // Switch to target window FIRST (so it takes focus before hiding overlay).
@@ -540,7 +546,6 @@ impl OverlayManager {
 
         // NOW hide the overlay — the target window is already visible, so no black flash.
         self.hide_windows();
-        *state = OverlayState::Hidden;
 
         tracing::info!("Overlay hidden immediately: target={:?}", switch_target);
     }

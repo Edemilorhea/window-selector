@@ -211,6 +211,7 @@ pub fn snapshot_windows(
     windows
 }
 
+#[allow(dead_code)]
 /// Resolve persistent quick-list tags to the best current HWNDs.
 ///
 /// `windows` must already be sorted by MRU order so the first matching window for an
@@ -222,18 +223,59 @@ pub fn resolve_quick_tags(windows: &mut [WindowInfo], quick_tags: &[QuickTagEntr
 
     let mut resolved = SessionTags::new();
     for entry in quick_tags {
-        if let Some(window) = windows.iter_mut().find(|window| {
-            window
-                .exe_path
-                .as_deref()
-                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&entry.exe_path))
-        }) {
-            window.number_tag = Some(entry.number);
-            resolved.assign(entry.number, window.hwnd);
+        if let Some(i) = find_by_exe_path(windows, &entry.exe_path) {
+            windows[i].number_tag = Some(entry.number);
+            resolved.assign(entry.number, windows[i].hwnd);
         }
     }
 
     resolved
+}
+
+/// Returns the index of the first window whose exe_path matches (case-insensitive).
+fn find_by_exe_path(windows: &[WindowInfo], exe_path: &str) -> Option<usize> {
+    windows.iter().position(|w| {
+        w.exe_path
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(exe_path))
+    })
+}
+
+/// Like `resolve_quick_tags` but preserves existing live HWND assignments in `session_tags`.
+/// Only falls back to exe_path matching when the recorded HWND is both absent from the
+/// current snapshot AND no longer a valid window (e.g. closed). If the HWND is alive but
+/// temporarily off-screen (cloaked on another virtual desktop), the binding is kept as-is
+/// so the user's tag survives a desktop switch.
+pub fn refresh_quick_tags(
+    windows: &mut [WindowInfo],
+    quick_tags: &[QuickTagEntry],
+    session_tags: &mut SessionTags,
+) {
+    for window in windows.iter_mut() {
+        window.number_tag = None;
+    }
+
+    for entry in quick_tags {
+        // If session_tags has an HWND for this tag, try to honour it.
+        if let Some(hwnd) = session_tags.get(entry.number) {
+            if let Some(window) = windows.iter_mut().find(|w| w.hwnd == hwnd) {
+                // Tagged window is in the snapshot — mark it and keep the binding.
+                window.number_tag = Some(entry.number);
+                continue;
+            }
+            // HWND not in snapshot. If the window is still alive (e.g. cloaked on
+            // another virtual desktop), keep the binding but show no badge this session.
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
+                continue;
+            }
+        }
+
+        // No live binding — fall back to first exe_path match.
+        if let Some(i) = find_by_exe_path(windows, &entry.exe_path) {
+            windows[i].number_tag = Some(entry.number);
+            session_tags.assign(entry.number, windows[i].hwnd);
+        }
+    }
 }
 
 fn get_window_exe_path(hwnd: HWND) -> Option<String> {
@@ -324,6 +366,83 @@ mod quick_tag_tests {
 
         assert_eq!(resolved.get(9), None);
         assert_eq!(windows[0].number_tag, None);
+    }
+
+    // --- refresh_quick_tags ---
+
+    #[test]
+    fn test_refresh_preserves_existing_session_binding() {
+        // Two terminals with same exe. Session already tagged the second (hwnd 2).
+        // refresh must NOT reassign to the first (MRU-first kidnapping).
+        let mut windows = vec![
+            make_window(1, r"C:\WindowsTerminal.exe"),
+            make_window(2, r"C:\WindowsTerminal.exe"),
+        ];
+        let mut session_tags = SessionTags::new();
+        session_tags.assign(1, hwnd(2));
+        let quick_tags = vec![QuickTagEntry {
+            number: 1,
+            exe_path: String::from(r"C:\WindowsTerminal.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(session_tags.get(1), Some(hwnd(2)), "binding must not be kidnapped");
+        assert_eq!(windows[1].number_tag, Some(1));
+        assert_eq!(windows[0].number_tag, None);
+    }
+
+    #[test]
+    fn test_refresh_falls_back_when_session_hwnd_gone() {
+        // session_tags points to hwnd(99) which is not in the snapshot and is not a
+        // real Win32 window (IsWindow returns false for a fake pointer), so the
+        // fallback to exe_path matching should fire.
+        let mut windows = vec![make_window(1, r"C:\app.exe")];
+        let mut session_tags = SessionTags::new();
+        session_tags.assign(2, hwnd(99));
+        let quick_tags = vec![QuickTagEntry {
+            number: 2,
+            exe_path: String::from(r"C:\app.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(session_tags.get(2), Some(hwnd(1)), "should rebind to live window");
+        assert_eq!(windows[0].number_tag, Some(2));
+    }
+
+    #[test]
+    fn test_refresh_no_binding_when_no_exe_match() {
+        let mut windows = vec![make_window(1, r"C:\other.exe")];
+        let mut session_tags = SessionTags::new();
+        let quick_tags = vec![QuickTagEntry {
+            number: 5,
+            exe_path: String::from(r"C:\app.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(session_tags.get(5), None);
+        assert_eq!(windows[0].number_tag, None);
+    }
+
+    #[test]
+    fn test_refresh_clears_all_number_tags_before_assigning() {
+        // A window with a stale number_tag from a previous session must be cleared.
+        let mut windows = vec![{
+            let mut w = make_window(1, r"C:\app.exe");
+            w.number_tag = Some(7);
+            w
+        }];
+        let mut session_tags = SessionTags::new();
+        let quick_tags = vec![QuickTagEntry {
+            number: 3,
+            exe_path: String::from(r"C:\app.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(windows[0].number_tag, Some(3), "stale tag 7 replaced by 3");
     }
 }
 
