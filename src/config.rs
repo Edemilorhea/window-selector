@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickTagEntry {
+    pub number: u8,
+    pub exe_path: String,
+}
+
 fn default_hotkey_modifiers() -> u32 {
     MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
 }
@@ -69,7 +75,6 @@ pub struct AppConfig {
     pub label_hotkey_vk: u32,
 
     // --- New fields (all with serde defaults for backward compatibility) ---
-
     /// Launch Window Selector automatically at Windows startup.
     #[serde(default)]
     pub launch_at_startup: bool,
@@ -98,6 +103,9 @@ pub struct AppConfig {
     /// Alpha channel of the backdrop brush (dark rectangle behind grid). Range: 0.0–1.0. Default: 0.86.
     #[serde(default = "default_background_opacity")]
     pub background_opacity: f32,
+    /// Persistent quick-list tags. Each entry maps number key (1-9) to executable path.
+    #[serde(default)]
+    pub quick_tags: Vec<QuickTagEntry>,
 
     /// How to handle overlapping labels in label mode.
     /// Default: AutoNudge.
@@ -120,6 +128,7 @@ impl Default for AppConfig {
             label_font_size: default_label_font_size(),
             title_font_size: default_title_font_size(),
             background_opacity: default_background_opacity(),
+            quick_tags: Vec::new(),
             label_overlap_strategy: default_label_overlap_strategy(),
         }
     }
@@ -130,12 +139,26 @@ impl AppConfig {
     /// Call after deserialization and after slider commit.
     pub fn validate(&mut self) {
         self.overlay_opacity = self.overlay_opacity.max(50); // min 50
-        // max is 255 by type (u8)
+                                                             // max is 255 by type (u8)
         self.fade_duration_ms = self.fade_duration_ms.min(500);
         self.grid_padding = self.grid_padding.clamp(4.0, 48.0);
         self.label_font_size = self.label_font_size.clamp(10.0, 32.0);
         self.title_font_size = self.title_font_size.clamp(8.0, 24.0);
         self.background_opacity = self.background_opacity.clamp(0.0, 1.0);
+        self.quick_tags
+            .retain(|entry| (1..=9).contains(&entry.number) && !entry.exe_path.is_empty());
+        self.quick_tags.sort_by_key(|entry| entry.number);
+        self.quick_tags.dedup_by_key(|entry| entry.number);
+    }
+
+    pub fn set_quick_tag(&mut self, number: u8, exe_path: String) {
+        self.quick_tags.retain(|entry| entry.number != number);
+        self.quick_tags.push(QuickTagEntry { number, exe_path });
+        self.quick_tags.sort_by_key(|entry| entry.number);
+    }
+
+    pub fn remove_quick_tag(&mut self, number: u8) {
+        self.quick_tags.retain(|entry| entry.number != number);
     }
 
     /// Load config from the given directory. Creates default config if file does not exist.
@@ -200,7 +223,9 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keycodes::{MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_F1, VK_Q, VK_Y};
+    use crate::keycodes::{
+        MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_F1, VK_Q, VK_Y,
+    };
     use std::fs;
 
     fn temp_dir() -> PathBuf {
@@ -218,7 +243,10 @@ mod tests {
     fn test_default_config_load_on_missing_file() {
         let dir = temp_dir();
         let config = AppConfig::load(&dir).expect("load should succeed");
-        assert_eq!(config.hotkey_modifiers, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT);
+        assert_eq!(
+            config.hotkey_modifiers,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
+        );
         assert_eq!(config.hotkey_vk, VK_Q);
         assert_eq!(config.label_hotkey_modifiers, MOD_WIN | MOD_NOREPEAT);
         assert_eq!(config.label_hotkey_vk, VK_Y);
@@ -242,6 +270,10 @@ mod tests {
             label_font_size: 22.0,
             title_font_size: 15.0,
             background_opacity: 0.9,
+            quick_tags: vec![QuickTagEntry {
+                number: 1,
+                exe_path: String::from(r"C:\\Windows\\System32\\notepad.exe"),
+            }],
             label_overlap_strategy: LabelOverlapStrategy::VisibleRegion,
         };
         AppConfig::save(&dir, &original).expect("save should succeed");
@@ -255,6 +287,7 @@ mod tests {
         assert!((loaded.label_font_size - original.label_font_size).abs() < 0.001);
         assert!((loaded.title_font_size - original.title_font_size).abs() < 0.001);
         assert!((loaded.background_opacity - original.background_opacity).abs() < 0.001);
+        assert_eq!(loaded.quick_tags, original.quick_tags);
         assert_eq!(loaded.label_overlap_strategy, original.label_overlap_strategy);
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
@@ -268,7 +301,7 @@ mod tests {
         fs::write(&config_path, b"not valid toml {{{{").expect("write corrupt");
         let config = AppConfig::load(&dir).expect("should return defaults, not error");
         assert_eq!(config.hotkey_vk, VK_Q); // default
-        // Cleanup
+                                            // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -306,6 +339,7 @@ mod tests {
         assert!((config.background_opacity - 0.86).abs() < 0.001);
         assert!(!config.launch_at_startup);
         assert!(!config.direct_switch);
+        assert!(config.quick_tags.is_empty());
         assert_eq!(config.label_overlap_strategy, LabelOverlapStrategy::AutoNudge);
     }
 
@@ -335,6 +369,50 @@ mod tests {
         let mut validated = AppConfig::default();
         validated.validate();
 
+        assert_eq!(
+            validated.overlay_opacity, original.overlay_opacity,
+            "validate() must not change default overlay_opacity"
+        );
+        assert_eq!(
+            validated.fade_duration_ms, original.fade_duration_ms,
+            "validate() must not change default fade_duration_ms"
+        );
+        assert!(
+            (validated.grid_padding - original.grid_padding).abs() < 0.001,
+            "validate() must not change default grid_padding"
+        );
+        assert!(
+            (validated.label_font_size - original.label_font_size).abs() < 0.001,
+            "validate() must not change default label_font_size"
+        );
+        assert!(
+            (validated.title_font_size - original.title_font_size).abs() < 0.001,
+            "validate() must not change default title_font_size"
+        );
+        assert!(
+            (validated.background_opacity - original.background_opacity).abs() < 0.001,
+            "validate() must not change default background_opacity"
+        );
+        assert_eq!(
+            validated.hotkey_modifiers, original.hotkey_modifiers,
+            "validate() must not change default hotkey_modifiers"
+        );
+        assert_eq!(
+            validated.hotkey_vk, original.hotkey_vk,
+            "validate() must not change default hotkey_vk"
+        );
+        assert_eq!(
+            validated.direct_switch, original.direct_switch,
+            "validate() must not change default direct_switch"
+        );
+        assert_eq!(
+            validated.launch_at_startup, original.launch_at_startup,
+            "validate() must not change default launch_at_startup"
+        );
+        assert_eq!(
+            validated.quick_tags, original.quick_tags,
+            "validate() must not change default quick_tags"
+        );
         assert_eq!(validated.overlay_opacity, original.overlay_opacity,
             "validate() must not change default overlay_opacity");
         assert_eq!(validated.fade_duration_ms, original.fade_duration_ms,
@@ -366,17 +444,14 @@ mod tests {
         fs::create_dir_all(&dir).expect("create dir");
         let config_path = dir.join("config.toml");
         // Old format with only original fields
-        fs::write(
-            &config_path,
-            b"hotkey_modifiers = 16387\nhotkey_vk = 81\n",
-        )
-        .expect("write");
+        fs::write(&config_path, b"hotkey_modifiers = 16387\nhotkey_vk = 81\n").expect("write");
         let config = AppConfig::load(&dir).expect("load should succeed");
         assert_eq!(config.hotkey_modifiers, 16387);
         assert_eq!(config.hotkey_vk, 81);
         assert_eq!(config.overlay_opacity, 220); // default
         assert_eq!(config.fade_duration_ms, 150); // default
         assert!((config.background_opacity - 0.86).abs() < 0.001); // default
+        assert!(config.quick_tags.is_empty());
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }

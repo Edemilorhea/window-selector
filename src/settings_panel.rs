@@ -12,6 +12,7 @@ use crate::keycodes::{
     WM_KEYDOWN_RAW, WM_SYSKEYDOWN_RAW,
 };
 use crate::settings_renderer::{ControlRects, DrawState, SettingsRenderer};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, PtInRect};
@@ -19,15 +20,12 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics,
-    HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, PostMessageW, RegisterClassExW,
-    SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    CS_HREDRAW, CS_VREDRAW, HMENU, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
-    WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WNDCLASSEXW, WS_EX_APPWINDOW,
-    WS_CAPTION, WS_MINIMIZEBOX, WS_SYSMENU,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, PostMessageW,
+    RegisterClassExW, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, CS_HREDRAW, CS_VREDRAW,
+    HC_ACTION, HHOOK, HMENU, KBDLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WH_KEYBOARD_LL,
+    WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_SYSMENU,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SETTINGS_CLASS_NAME: &str = "WindowSelectorSettings\0";
 const SETTINGS_WINDOW_TITLE: &str = "Window Selector Settings\0";
@@ -397,12 +395,12 @@ impl SettingsPanelManager {
         let t = ((x - track.left) as f32 / track_w).clamp(0.0, 1.0);
 
         let (min_v, max_v) = match idx {
-            0 => (50.0_f32, 255.0_f32),  // overlay_opacity
-            1 => (0.0_f32, 1.0_f32),     // background_opacity
-            2 => (0.0_f32, 500.0_f32),   // fade_duration_ms
-            3 => (4.0_f32, 48.0_f32),    // grid_padding
-            4 => (10.0_f32, 32.0_f32),   // label_font_size
-            5 => (8.0_f32, 24.0_f32),    // title_font_size
+            0 => (50.0_f32, 255.0_f32), // overlay_opacity
+            1 => (0.0_f32, 1.0_f32),    // background_opacity
+            2 => (0.0_f32, 500.0_f32),  // fade_duration_ms
+            3 => (4.0_f32, 48.0_f32),   // grid_padding
+            4 => (10.0_f32, 32.0_f32),  // label_font_size
+            5 => (8.0_f32, 24.0_f32),   // title_font_size
             _ => return,
         };
 
@@ -509,10 +507,18 @@ impl SettingsPanelManager {
             crate::hotkey::unregister_hotkey(app.msg_hwnd);
             crate::hotkey::unregister_label_hotkey(app.msg_hwnd);
 
-            if let Err(e) = crate::hotkey::register_hotkey(app.msg_hwnd, defaults.hotkey_modifiers, defaults.hotkey_vk) {
+            if let Err(e) = crate::hotkey::register_hotkey(
+                app.msg_hwnd,
+                defaults.hotkey_modifiers,
+                defaults.hotkey_vk,
+            ) {
                 tracing::error!("Failed to register default hotkey: {:?}", e);
             }
-            if let Err(e) = crate::hotkey::register_label_hotkey(app.msg_hwnd, defaults.label_hotkey_modifiers, defaults.label_hotkey_vk) {
+            if let Err(e) = crate::hotkey::register_label_hotkey(
+                app.msg_hwnd,
+                defaults.label_hotkey_modifiers,
+                defaults.label_hotkey_vk,
+            ) {
                 tracing::error!("Failed to register default label hotkey: {:?}", e);
             }
 
@@ -541,7 +547,10 @@ impl SettingsPanelManager {
             if target == 1 {
                 (app.config.hotkey_modifiers, app.config.hotkey_vk)
             } else {
-                (app.config.label_hotkey_modifiers, app.config.label_hotkey_vk)
+                (
+                    app.config.label_hotkey_modifiers,
+                    app.config.label_hotkey_vk,
+                )
             }
         };
 
@@ -595,13 +604,19 @@ impl SettingsPanelManager {
                         if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
                             tracing::error!("Failed to save config after hotkey change: {}", e);
                         }
-                        tracing::info!("Main hotkey changed to modifiers=0x{:X} vk=0x{:X}", modifiers, vk);
+                        tracing::info!(
+                            "Main hotkey changed to modifiers=0x{:X} vk=0x{:X}",
+                            modifiers,
+                            vk
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("New main hotkey conflict: {:?}", e);
                         self.main_hotkey_error = "Hotkey already in use".to_string();
                         // Revert to previous hotkey
-                        if let Err(e2) = crate::hotkey::register_hotkey(app.msg_hwnd, prev_mod, prev_vk) {
+                        if let Err(e2) =
+                            crate::hotkey::register_hotkey(app.msg_hwnd, prev_mod, prev_vk)
+                        {
                             tracing::error!("Failed to re-register previous hotkey: {:?}", e2);
                         } else {
                             app.config.hotkey_modifiers = prev_mod;
@@ -618,16 +633,28 @@ impl SettingsPanelManager {
                         app.config.label_hotkey_vk = vk;
                         self.label_hotkey_error.clear();
                         if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
-                            tracing::error!("Failed to save config after label hotkey change: {}", e);
+                            tracing::error!(
+                                "Failed to save config after label hotkey change: {}",
+                                e
+                            );
                         }
-                        tracing::info!("Label hotkey changed to modifiers=0x{:X} vk=0x{:X}", modifiers, vk);
+                        tracing::info!(
+                            "Label hotkey changed to modifiers=0x{:X} vk=0x{:X}",
+                            modifiers,
+                            vk
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("New label hotkey conflict: {:?}", e);
                         self.label_hotkey_error = "Hotkey already in use".to_string();
                         // Revert
-                        if let Err(e2) = crate::hotkey::register_label_hotkey(app.msg_hwnd, prev_mod, prev_vk) {
-                            tracing::error!("Failed to re-register previous label hotkey: {:?}", e2);
+                        if let Err(e2) =
+                            crate::hotkey::register_label_hotkey(app.msg_hwnd, prev_mod, prev_vk)
+                        {
+                            tracing::error!(
+                                "Failed to re-register previous label hotkey: {:?}",
+                                e2
+                            );
                         } else {
                             app.config.label_hotkey_modifiers = prev_mod;
                             app.config.label_hotkey_vk = prev_vk;
@@ -660,9 +687,9 @@ impl Default for SettingsPanelManager {
 mod tests {
     use super::*;
     use crate::keycodes::{
-        is_modifier_only, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
-        VK_A, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-        VK_Q, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_Y,
+        is_modifier_only, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_A, VK_CONTROL,
+        VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_Q, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
+        VK_RWIN, VK_SHIFT, VK_Y,
     };
 
     // TC-2.1: Recorder starts in Idle state
@@ -684,7 +711,11 @@ mod tests {
         };
         assert_ne!(state, HotkeyRecorderState::Idle);
         match state {
-            HotkeyRecorderState::Recording { target, previous_modifiers, previous_vk } => {
+            HotkeyRecorderState::Recording {
+                target,
+                previous_modifiers,
+                previous_vk,
+            } => {
                 assert_eq!(target, 1);
                 assert_eq!(previous_modifiers, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT);
                 assert_eq!(previous_vk, VK_Q);
@@ -717,17 +748,44 @@ mod tests {
     #[test]
     fn test_is_modifier_only_identifies_modifier_keys() {
         // All modifier keycodes must return true
-        assert!(is_modifier_only(VK_SHIFT),    "VK_SHIFT should be modifier-only");
-        assert!(is_modifier_only(VK_CONTROL),  "VK_CONTROL should be modifier-only");
-        assert!(is_modifier_only(VK_MENU),     "VK_MENU (Alt) should be modifier-only");
-        assert!(is_modifier_only(VK_LSHIFT),   "VK_LSHIFT should be modifier-only");
-        assert!(is_modifier_only(VK_RSHIFT),   "VK_RSHIFT should be modifier-only");
-        assert!(is_modifier_only(VK_LCONTROL), "VK_LCONTROL should be modifier-only");
-        assert!(is_modifier_only(VK_RCONTROL), "VK_RCONTROL should be modifier-only");
-        assert!(is_modifier_only(VK_LMENU),    "VK_LMENU should be modifier-only");
-        assert!(is_modifier_only(VK_RMENU),    "VK_RMENU should be modifier-only");
-        assert!(is_modifier_only(VK_LWIN),     "VK_LWIN should be modifier-only");
-        assert!(is_modifier_only(VK_RWIN),     "VK_RWIN should be modifier-only");
+        assert!(
+            is_modifier_only(VK_SHIFT),
+            "VK_SHIFT should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_CONTROL),
+            "VK_CONTROL should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_MENU),
+            "VK_MENU (Alt) should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_LSHIFT),
+            "VK_LSHIFT should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_RSHIFT),
+            "VK_RSHIFT should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_LCONTROL),
+            "VK_LCONTROL should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_RCONTROL),
+            "VK_RCONTROL should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_LMENU),
+            "VK_LMENU should be modifier-only"
+        );
+        assert!(
+            is_modifier_only(VK_RMENU),
+            "VK_RMENU should be modifier-only"
+        );
+        assert!(is_modifier_only(VK_LWIN), "VK_LWIN should be modifier-only");
+        assert!(is_modifier_only(VK_RWIN), "VK_RWIN should be modifier-only");
     }
 
     // TC-2.4 (continued): Non-modifier keys must NOT be identified as modifier-only
@@ -737,7 +795,10 @@ mod tests {
         assert!(!is_modifier_only(VK_Q), "VK_Q should not be modifier-only");
         assert!(!is_modifier_only(VK_Y), "VK_Y should not be modifier-only");
         assert!(!is_modifier_only(0x70), "F1 should not be modifier-only");
-        assert!(!is_modifier_only(0x20), "VK_SPACE should not be modifier-only");
+        assert!(
+            !is_modifier_only(0x20),
+            "VK_SPACE should not be modifier-only"
+        );
     }
 
     // TC-2.5: Valid combo (modifier + non-modifier) passes validation
@@ -748,7 +809,10 @@ mod tests {
         // MOD_NOREPEAT is 0x4000; mask it out to check real modifiers.
         let modifiers_ctrl_alt = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
         let has_modifier = (modifiers_ctrl_alt & !0x4000u32) != 0;
-        assert!(has_modifier, "Ctrl+Alt combo should have at least one modifier");
+        assert!(
+            has_modifier,
+            "Ctrl+Alt combo should have at least one modifier"
+        );
 
         let modifiers_win = MOD_WIN | MOD_NOREPEAT;
         let has_modifier = (modifiers_win & !0x4000u32) != 0;
@@ -756,7 +820,10 @@ mod tests {
 
         let modifiers_shift = MOD_SHIFT | MOD_NOREPEAT;
         let has_modifier = (modifiers_shift & !0x4000u32) != 0;
-        assert!(has_modifier, "Shift combo should have at least one modifier");
+        assert!(
+            has_modifier,
+            "Shift combo should have at least one modifier"
+        );
     }
 
     // TC-2.5 (continued): MOD_NOREPEAT alone is not a valid modifier combo
@@ -765,7 +832,10 @@ mod tests {
         // If only MOD_NOREPEAT is set, the combo has no real modifier.
         let modifiers_none = MOD_NOREPEAT; // 0x4000 only
         let has_modifier = (modifiers_none & !0x4000u32) != 0;
-        assert!(!has_modifier, "MOD_NOREPEAT alone should not count as a modifier");
+        assert!(
+            !has_modifier,
+            "MOD_NOREPEAT alone should not count as a modifier"
+        );
     }
 
     // TC-2.6: Self-conflict detection (same VK+mods for both hotkeys)
@@ -782,7 +852,10 @@ mod tests {
 
         let conflict = config.hotkey_vk == config.label_hotkey_vk
             && config.hotkey_modifiers == config.label_hotkey_modifiers;
-        assert!(conflict, "Same vk+mods for both hotkeys should be detected as conflict");
+        assert!(
+            conflict,
+            "Same vk+mods for both hotkeys should be detected as conflict"
+        );
     }
 
     // TC-2.6 (continued): Different combos should not conflict
@@ -799,17 +872,12 @@ mod tests {
 
 /// Low-level keyboard hook callback — captures key combinations during recording mode.
 /// Installed only when `HotkeyRecorderState::Recording` is active.
-unsafe extern "system" fn ll_keyboard_proc(
-    code: i32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {
         return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
     }
 
-    let is_key_down = wparam.0 == WM_KEYDOWN_RAW as usize
-        || wparam.0 == WM_SYSKEYDOWN_RAW as usize;
+    let is_key_down = wparam.0 == WM_KEYDOWN_RAW as usize || wparam.0 == WM_SYSKEYDOWN_RAW as usize;
     if !is_key_down {
         return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
     }
@@ -833,7 +901,7 @@ unsafe extern "system" fn ll_keyboard_proc(
         VK_LSHIFT | VK_RSHIFT |              // side-specific Shift
         VK_LCONTROL | VK_RCONTROL |          // side-specific Ctrl
         VK_LMENU | VK_RMENU |               // side-specific Alt
-        VK_LWIN | VK_RWIN                    // Windows logo keys
+        VK_LWIN | VK_RWIN // Windows logo keys
     );
     if is_modifier {
         // Let modifier pass through so GetAsyncKeyState can read state
@@ -848,10 +916,18 @@ unsafe extern "system" fn ll_keyboard_proc(
         || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000) != 0;
 
     let mut modifiers: u32 = MOD_NOREPEAT; // always set
-    if ctrl { modifiers |= MOD_CONTROL; }
-    if alt { modifiers |= MOD_ALT; }
-    if shift { modifiers |= MOD_SHIFT; }
-    if win { modifiers |= MOD_WIN; }
+    if ctrl {
+        modifiers |= MOD_CONTROL;
+    }
+    if alt {
+        modifiers |= MOD_ALT;
+    }
+    if shift {
+        modifiers |= MOD_SHIFT;
+    }
+    if win {
+        modifiers |= MOD_WIN;
+    }
 
     // Must have at least one modifier besides MOD_NOREPEAT
     let has_modifier = (modifiers & !0x4000) != 0;
@@ -888,7 +964,9 @@ pub unsafe extern "system" fn settings_wndproc(
             let mut ps = PAINTSTRUCT::default();
             let _hdc = BeginPaint(hwnd, &mut ps);
 
-            if let (Some(renderer), Some(app_ptr)) = (&panel.renderer, Some(crate::get_app_state_pub())) {
+            if let (Some(renderer), Some(app_ptr)) =
+                (&panel.renderer, Some(crate::get_app_state_pub()))
+            {
                 if !app_ptr.is_null() {
                     let app = &*app_ptr;
                     let draw_state = panel.build_draw_state();
@@ -952,9 +1030,7 @@ pub unsafe extern "system" fn settings_wndproc(
             LRESULT(0)
         }
 
-        WM_DESTROY => {
-            LRESULT(0)
-        }
+        WM_DESTROY => LRESULT(0),
 
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }

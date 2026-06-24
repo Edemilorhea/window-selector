@@ -7,6 +7,7 @@ use windows::Win32::UI::WindowsAndMessaging::HICON;
 pub struct WindowInfo {
     pub hwnd: HWND,
     pub title: String,
+    pub exe_path: Option<String>,
     pub is_minimized: bool,
     pub monitor_index: usize,
     pub letter: Option<char>,
@@ -22,6 +23,7 @@ impl WindowInfo {
         Self {
             hwnd,
             title,
+            exe_path: None,
             is_minimized,
             monitor_index,
             letter: None,

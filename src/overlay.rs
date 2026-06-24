@@ -396,9 +396,6 @@ impl OverlayManager {
         self.render_selected = None;
         self.is_label_mode = true;
 
-        // Clear grid layout (label mode doesn't use grid)
-        self.grid_layout = None;
-
         // Calculate virtual screen bounds (covering all monitors)
         let mut min_x = i32::MAX;
         let mut min_y = i32::MAX;
@@ -479,12 +476,8 @@ impl OverlayManager {
             }
         }
 
-        // Set state BEFORE rendering.
+        // Set state BEFORE ShowWindow.
         *state = OverlayState::LabelMode { selected: None };
-
-        // Render the first frame BEFORE showing the window so the user never sees a blank frame.
-        // This eliminates the flash that would occur if ShowWindow displayed an empty buffer.
-        self.render_frame();
 
         unsafe {
             // For label mode, use color-key transparency (like the label overlay in normal mode).
@@ -501,7 +494,13 @@ impl OverlayManager {
 
             // Take keyboard focus.
             let _ = SetForegroundWindow(self.overlay_hwnds[0]);
+
+            // Force repaint.
+            let _ = InvalidateRect(self.overlay_hwnds[0], None, true);
         }
+
+        // Render labels immediately.
+        self.render_frame();
 
         tracing::info!("Label mode activated with {} windows", windows.len());
     }
@@ -512,9 +511,15 @@ impl OverlayManager {
             return;
         }
 
-        // Skip fade-out — hide immediately.
+        // Set state to Hidden FIRST. Two constraints require this ordering:
+        // (1) Re-entrancy: SetForegroundWindow sends WM_ACTIVATE(WA_INACTIVE) synchronously
+        //     on the same thread; the handler calls dismiss_overlay if state is Active,
+        //     which would restore the previous foreground instead of the intended target.
+        // (2) Black-flash: target window must be foreground before hide_windows() so the
+        //     desktop compositor has something to show on the monitor with no black gap.
+        *state = OverlayState::Hidden;
 
-        // Deactivate keyboard hook FIRST (before switching windows)
+        // Deactivate keyboard hook BEFORE switching windows
         crate::keyboard_hook::set_active(false);
 
         // Switch to target window FIRST (so it takes focus before hiding overlay).
@@ -541,7 +546,6 @@ impl OverlayManager {
 
         // NOW hide the overlay — the target window is already visible, so no black flash.
         self.hide_windows();
-        *state = OverlayState::Hidden;
 
         tracing::info!("Overlay hidden immediately: target={:?}", switch_target);
     }
@@ -659,6 +663,97 @@ impl OverlayManager {
                 let _ = windows::Win32::Graphics::Gdi::ValidateRect(hwnd, None);
             }
         }
+    }
+
+    /// Update monitor geometry after a display configuration change (WM_DISPLAYCHANGE).
+    ///
+    /// Replaces the stored monitor list with `new_monitors`, then moves/resizes every
+    /// overlay HWND (thumbnail overlays + label overlay) to match the new geometry.
+    /// The label overlay is always sized to the primary monitor.
+    ///
+    /// This must be called while the overlay is **hidden**; callers must dismiss the
+    /// overlay before invoking this method.
+    pub fn on_display_change(&mut self, new_monitors: Vec<MonitorInfo>) {
+        // Validate before overwriting existing state: a transient empty list
+        // (possible mid-resolution-change) must not wipe out the previously
+        // known monitor geometry, or later hide paths that depend on
+        // `self.monitors[0]` will silently skip their work.
+        if new_monitors.is_empty() {
+            tracing::warn!("on_display_change: no monitors reported, keeping previous monitor list");
+            return;
+        }
+        self.monitors = new_monitors;
+
+        unsafe {
+            // Resize/reposition each per-monitor thumbnail overlay HWND.
+            let hwnd_count = self.overlay_hwnds.len();
+            for (i, hwnd) in self.overlay_hwnds.iter().enumerate() {
+                // If we now have fewer monitors than HWNDs (e.g. a monitor was
+                // disconnected), hide the excess windows; they will be reused if
+                // the monitor reappears later.
+                if i >= self.monitors.len() {
+                    let _ = ShowWindow(*hwnd, SW_HIDE);
+                    tracing::debug!(
+                        "on_display_change: HWND {:?} has no matching monitor (i={}), hidden",
+                        hwnd,
+                        i
+                    );
+                    continue;
+                }
+                let rect = self.monitors[i].rect;
+                let _ = SetWindowPos(
+                    *hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOACTIVATE,
+                );
+                tracing::debug!(
+                    "on_display_change: HWND {:?} repositioned to {:?}",
+                    hwnd,
+                    rect
+                );
+            }
+
+            // If we now have more monitors than HWNDs we cannot create new windows
+            // here (window creation needs an HINSTANCE and the wndproc pointer which
+            // are held by the caller).  Log a warning so the discrepancy is visible;
+            // a full restart will pick up the new monitor.
+            if self.monitors.len() > hwnd_count {
+                tracing::warn!(
+                    "on_display_change: {} monitors but only {} overlay HWNDs; \
+                     extra monitors will be uncovered until restart",
+                    self.monitors.len(),
+                    hwnd_count
+                );
+            }
+
+            // Resize the label overlay to the (new) primary monitor.
+            if let Some(lhwnd) = self.label_hwnd {
+                let primary_rect = self.monitors[0].rect;
+                let _ = SetWindowPos(
+                    lhwnd,
+                    windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
+                    primary_rect.left,
+                    primary_rect.top,
+                    primary_rect.right - primary_rect.left,
+                    primary_rect.bottom - primary_rect.top,
+                    SWP_NOACTIVATE,
+                );
+                tracing::debug!(
+                    "on_display_change: label HWND {:?} repositioned to {:?}",
+                    lhwnd,
+                    primary_rect
+                );
+            }
+        }
+
+        tracing::info!(
+            "on_display_change: updated to {} monitor(s)",
+            self.monitors.len()
+        );
     }
 
     #[allow(dead_code)]

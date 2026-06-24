@@ -1,2 +1,4 @@
 /target
 *.o
+.Agent/
+run_debug.bat

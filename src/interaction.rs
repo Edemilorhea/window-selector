@@ -54,8 +54,8 @@ pub enum KeyAction {
     SwitchTo(HWND),
     /// Dismiss the overlay without switching (triggers fade-out, then restore previous focus).
     Dismiss,
-    /// Tag was assigned to the selected window (number). Triggers redraw.
-    TagAssigned,
+    /// Tag was assigned to the selected window. Triggers persistence and redraw.
+    TagAssigned { number: u8, hwnd: HWND },
 }
 
 /// Handle a WM_KEYDOWN event while the overlay is active.
@@ -69,6 +69,22 @@ pub fn handle_key_down(
     tags: &mut SessionTags,
     direct_switch: bool,
 ) -> KeyAction {
+    // Use GetAsyncKeyState (physical key state) instead of GetKeyState
+    // because the low-level keyboard hook swallows all keystrokes before the
+    // message queue processes them, so GetKeyState never sees Ctrl as pressed.
+    let ctrl_held = unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as i16) < 0 };
+
+    handle_key_down_with_ctrl_state(vk_code, state, windows, tags, direct_switch, ctrl_held)
+}
+
+fn handle_key_down_with_ctrl_state(
+    vk_code: u32,
+    state: &OverlayState,
+    windows: &[WindowInfo],
+    tags: &mut SessionTags,
+    direct_switch: bool,
+    ctrl_held: bool,
+) -> KeyAction {
     match state {
         OverlayState::FadingOut { .. } => {
             // No input accepted during fade-out
@@ -79,11 +95,6 @@ pub fn handle_key_down(
         }
         _ => {}
     }
-
-    // Use GetAsyncKeyState (physical key state) instead of GetKeyState
-    // because the low-level keyboard hook swallows all keystrokes before the
-    // message queue processes them, so GetKeyState never sees Ctrl as pressed.
-    let ctrl_held = unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as i16) < 0 };
 
     // Number keys (1-9)
     if let Some(num) = vk_to_digit(vk_code) {
@@ -97,7 +108,10 @@ pub fn handle_key_down(
                     // Clear any previous holder of this tag
                     tags.assign(num, window.hwnd);
                     tracing::info!("Tag {} assigned to {:?}", num, window.hwnd);
-                    return KeyAction::TagAssigned;
+                    return KeyAction::TagAssigned {
+                        number: num,
+                        hwnd: window.hwnd,
+                    };
                 }
             }
         } else {
@@ -211,6 +225,24 @@ mod tests {
         OverlayState::Active { selected: sel }
     }
 
+    fn handle_key_down_test(
+        vk_code: u32,
+        state: &OverlayState,
+        windows: &[WindowInfo],
+        tags: &mut SessionTags,
+        direct_switch: bool,
+        ctrl_held: bool,
+    ) -> KeyAction {
+        super::handle_key_down_with_ctrl_state(
+            vk_code,
+            state,
+            windows,
+            tags,
+            direct_switch,
+            ctrl_held,
+        )
+    }
+
     #[test]
     fn test_letter_key_selects_window() {
         let windows = vec![make_window_info(1, 'a'), make_window_info(2, 's')];
@@ -218,7 +250,7 @@ mod tests {
         let state = active_state(None);
 
         // Press 'A' (VK_A = 0x41)
-        let action = handle_key_down(VK_A.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(VK_A.0 as u32, &state, &windows, &mut tags, false, false);
         assert!(matches!(action, KeyAction::Select(0)));
     }
 
@@ -227,7 +259,14 @@ mod tests {
         let windows: Vec<WindowInfo> = vec![];
         let mut tags = SessionTags::new();
         let state = active_state(None);
-        let action = handle_key_down(VK_ESCAPE.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(
+            VK_ESCAPE.0 as u32,
+            &state,
+            &windows,
+            &mut tags,
+            false,
+            false,
+        );
         assert!(matches!(action, KeyAction::Dismiss));
     }
 
@@ -236,7 +275,14 @@ mod tests {
         let windows = vec![make_window_info(1, 'a')];
         let mut tags = SessionTags::new();
         let state = active_state(None);
-        let action = handle_key_down(VK_RETURN.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(
+            VK_RETURN.0 as u32,
+            &state,
+            &windows,
+            &mut tags,
+            false,
+            false,
+        );
         assert!(matches!(action, KeyAction::None));
     }
 
@@ -248,7 +294,14 @@ mod tests {
         let windows = vec![w];
         let mut tags = SessionTags::new();
         let state = active_state(Some(0));
-        let action = handle_key_down(VK_RETURN.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(
+            VK_RETURN.0 as u32,
+            &state,
+            &windows,
+            &mut tags,
+            false,
+            false,
+        );
         assert!(matches!(action, KeyAction::SwitchTo(_)));
     }
 
@@ -259,7 +312,14 @@ mod tests {
         let state = OverlayState::FadingOut {
             switch_target: None,
         };
-        let action = handle_key_down(VK_ESCAPE.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(
+            VK_ESCAPE.0 as u32,
+            &state,
+            &windows,
+            &mut tags,
+            false,
+            false,
+        );
         assert!(matches!(action, KeyAction::None));
     }
 
@@ -288,7 +348,8 @@ mod tests {
         let windows = vec![w];
         let mut tags = SessionTags::new();
         let state = active_state(Some(0));
-        let action = handle_key_down(VK_SPACE.0 as u32, &state, &windows, &mut tags, false);
+        let action =
+            handle_key_down_test(VK_SPACE.0 as u32, &state, &windows, &mut tags, false, false);
         assert!(
             matches!(action, KeyAction::SwitchTo(_)),
             "Space key with selection should trigger SwitchTo, got {:?}",
@@ -303,7 +364,7 @@ mod tests {
         let windows = vec![make_window_info(1, 'a')];
         let mut tags = SessionTags::new();
         let state = active_state(None);
-        let action = handle_key_down(VK_Z.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(VK_Z.0 as u32, &state, &windows, &mut tags, false, false);
         assert!(
             matches!(action, KeyAction::None),
             "Unassigned letter should produce None, got {:?}",
@@ -371,32 +432,24 @@ mod tests {
         w.letter = Some('a');
         let windows = vec![make_window_info(10, 'b'), make_window_info(11, 'c'), w];
         let mut tags = SessionTags::new();
-        // State: window at index 2 is selected
         let state = active_state(Some(2));
-        // Simulate Ctrl+1 — note: GetKeyState cannot be mocked in unit tests,
-        // but we verify via the ctrl path in handle_key_down. Since GetKeyState
-        // is a live API call, we call the vk_to_digit logic directly and verify
-        // that TagAssigned is produced when ctrl is conceptually held.
-        // The function reads live GetKeyState, so this test covers the code path
-        // that executes when ctrl IS held. On CI without a keyboard, GetKeyState
-        // returns 0 (not pressed). We test the ctrl branch via direct invocation
-        // with the knowledge that on a headless system Ctrl will read as not held.
-        // Instead, test the internal assign logic via SessionTags directly to
-        // cover TC-4.15's AC coverage without depending on GetKeyState.
-        //
-        // Verify: when Ctrl IS held and a digit is pressed, tag is assigned.
-        // Since we cannot mock GetKeyState, we verify the tag assignment side-effect
-        // by calling SessionTags::assign directly and confirming it was invoked:
-        tags.assign(1, h);
+
+        let action = handle_key_down_test(VK_1.0 as u32, &state, &windows, &mut tags, false, true);
+        assert!(matches!(action, KeyAction::TagAssigned { number: 1, hwnd } if hwnd == h));
         assert_eq!(
             tags.get(1),
             Some(h),
             "Tag 1 should point to the selected window's HWND"
         );
-        // Also verify that without ctrl, a number key produces None or SwitchTo (not TagAssigned)
-        // when no tag is set for that number.
-        let action_no_ctrl =
-            handle_key_down(VK_1.0 as u32, &state, &windows, &mut SessionTags::new(), false);
+
+        let action_no_ctrl = handle_key_down_test(
+            VK_1.0 as u32,
+            &state,
+            &windows,
+            &mut SessionTags::new(),
+            false,
+            false,
+        );
         // With an empty tags store and no Ctrl, pressing 1 should produce None (no tagged window).
         assert!(
             matches!(action_no_ctrl, KeyAction::None),
@@ -408,26 +461,15 @@ mod tests {
     // --- TC-4.16: Ctrl+Number with no selection is a no-op ---
     #[test]
     fn test_ctrl_number_no_selection_is_noop() {
-        // With no selection, Ctrl+Number should not call tags.assign.
-        // We verify by checking tags remains empty after the call attempt.
-        // GetKeyState cannot be mocked, so we test the state precondition path:
-        // state has no selection → the Ctrl+Number branch (if ctrl held) returns None.
-        // We directly verify the state guard: only Active { selected: Some(_) } assigns a tag.
         let windows = vec![make_window_info(1, 'a')];
         let mut tags = SessionTags::new();
-        let state = active_state(None); // No selection
-                                        // Even if GetKeyState returned ctrl-held (which it won't in test),
-                                        // the guard `if let OverlayState::Active { selected: Some(idx) }` prevents assignment.
-                                        // Simulate by calling handle_key_down and verifying tags remains empty.
-        let action = handle_key_down(VK_1.0 as u32, &state, &windows, &mut tags, false);
-        // Without ctrl (which GetKeyState returns as not-held in tests), this is a number
-        // switch path; tags is empty so result is None.
+        let state = active_state(None);
+        let action = handle_key_down_test(VK_1.0 as u32, &state, &windows, &mut tags, false, true);
         assert!(
             matches!(action, KeyAction::None),
-            "Number key with no tag assigned and no ctrl should be None, got {:?}",
+            "Ctrl+Number with no selection should be None, got {:?}",
             action
         );
-        // Tags should remain empty — no assignment happened.
         assert_eq!(
             tags.all_tags().len(),
             0,
@@ -445,7 +487,7 @@ mod tests {
         let windows: Vec<WindowInfo> = vec![];
         let state = active_state(None);
         // Press '1' without Ctrl — should switch to the tagged window.
-        let action = handle_key_down(VK_1.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(VK_1.0 as u32, &state, &windows, &mut tags, false, false);
         assert!(
             matches!(action, KeyAction::SwitchTo(_)),
             "Number key with valid tag should produce SwitchTo, got {:?}",
@@ -460,7 +502,7 @@ mod tests {
         // Tag 5 is not assigned
         let windows: Vec<WindowInfo> = vec![];
         let state = active_state(None);
-        let action = handle_key_down(VK_5.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(VK_5.0 as u32, &state, &windows, &mut tags, false, false);
         assert!(
             matches!(action, KeyAction::None),
             "Unassigned number key should produce None, got {:?}",
@@ -477,7 +519,7 @@ mod tests {
         let windows = vec![w];
         let mut tags = SessionTags::new();
         let state = active_state(None);
-        let action = handle_key_down(VK_A.0 as u32, &state, &windows, &mut tags, true);
+        let action = handle_key_down_test(VK_A.0 as u32, &state, &windows, &mut tags, true, false);
         assert!(
             matches!(action, KeyAction::SwitchTo(_)),
             "Direct switch: letter key should produce SwitchTo, got {:?}",
@@ -490,7 +532,7 @@ mod tests {
         let windows = vec![make_window_info(1, 'a')];
         let mut tags = SessionTags::new();
         let state = active_state(None);
-        let action = handle_key_down(VK_A.0 as u32, &state, &windows, &mut tags, false);
+        let action = handle_key_down_test(VK_A.0 as u32, &state, &windows, &mut tags, false, false);
         assert!(
             matches!(action, KeyAction::Select(0)),
             "Confirm mode: letter key should produce Select, got {:?}",

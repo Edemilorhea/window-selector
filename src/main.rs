@@ -37,33 +37,41 @@ use tray::{
     add_tray_icon, remove_tray_icon, show_balloon, MENU_ABOUT, MENU_DIRECT_SWITCH, MENU_EXIT,
     MENU_SETTINGS, WM_TRAY_CALLBACK,
 };
-use window_enumerator::{filter_occluded_for_label_mode, register_overlay_hwnds, snapshot_windows};
+use window_enumerator::{
+    filter_occluded_for_label_mode, refresh_quick_tags, register_overlay_hwnds, snapshot_windows,
+};
 use window_switcher::{restore_focus, switch_to_window};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DrawTextW, EndPaint, FillRect, RoundRect,
     SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT,
     PS_NULL, TRANSPARENT,
 };
-use windows::Win32::UI::WindowsAndMessaging::DrawIconEx;
-use windows::Win32::UI::WindowsAndMessaging::DI_NORMAL;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::WindowsAndMessaging::DrawIconEx;
+use windows::Win32::UI::WindowsAndMessaging::DI_NORMAL;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    TranslateMessage, GWLP_USERDATA, HMENU,
-    MSG, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_TIMER, WM_ACTIVATE, WM_PAINT,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW, CS_HREDRAW, CS_VREDRAW, WA_INACTIVE,
-    HWND_MESSAGE,
+    GetMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
+    CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, HWND_MESSAGE, MSG, WA_INACTIVE, WM_ACTIVATE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_PAINT, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 const MSG_WINDOW_CLASS: &str = "WindowSelectorMsgWnd\0";
 const MSG_WINDOW_NAME: &str = "Window Selector\0";
+/// Window class for the broadcast-receiver window.
+///
+/// `WM_DISPLAYCHANGE` (and other system broadcasts) are sent to top-level windows
+/// only — they are NOT delivered to `HWND_MESSAGE` windows.  This separate class is
+/// registered for a 0×0 `WS_POPUP` window whose sole purpose is to receive those
+/// broadcasts and forward them to the application logic.
+const BROADCAST_WINDOW_CLASS: &str = "WindowSelectorBroadcastWnd\0";
 
 /// Application state owned by the single message pump thread.
 #[allow(dead_code)]
@@ -77,6 +85,12 @@ pub(crate) struct AppState {
     pub(crate) previous_foreground: Option<HWND>,
     pub(crate) window_snapshot: Vec<window_info::WindowInfo>,
     pub(crate) msg_hwnd: HWND,
+    /// Hidden top-level 0×0 window whose only job is to receive system
+    /// broadcast messages (e.g. `WM_DISPLAYCHANGE`).  `HWND_MESSAGE` windows
+    /// are excluded from the broadcast list, so `msg_hwnd` never sees those
+    /// messages.  This window uses `main_wndproc` and is kept alive for the
+    /// lifetime of the message loop.
+    pub(crate) broadcast_hwnd: HWND,
     pub(crate) settings_panel: settings_panel::SettingsPanelManager,
 }
 
@@ -117,8 +131,8 @@ fn main() {
     // main(); Windows releases it automatically when the process exits.
     let _mutex = unsafe {
         match CreateMutexW(
-            None,  // default security
-            true,  // this process claims ownership immediately
+            None, // default security
+            true, // this process claims ownership immediately
             w!("Global\\window-selector-single-instance"),
         ) {
             Ok(handle) => {
@@ -249,6 +263,56 @@ unsafe fn run_message_loop(config: AppConfig, config_dir: std::path::PathBuf) {
 
     tracing::info!("Message window HWND={:?}", msg_hwnd);
 
+    // Create a dedicated top-level broadcast-receiver window.
+    //
+    // WHY: `HWND_MESSAGE` windows are excluded from the Windows broadcast
+    // list, so `msg_hwnd` (created above with `HWND_MESSAGE` as parent) never
+    // receives `WM_DISPLAYCHANGE` or other system-wide broadcast messages.
+    // A plain `WS_POPUP` top-level window with no parent receives all
+    // broadcasts.  This 0×0 invisible window handles those messages and
+    // dispatches them through `main_wndproc` just like `msg_hwnd` does.
+    let broadcast_class_name: Vec<u16> = BROADCAST_WINDOW_CLASS.encode_utf16().collect();
+    let broadcast_wc = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES(0),
+        lpfnWndProc: Some(main_wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance.into(),
+        hIcon: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
+        hCursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR::default(),
+        hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH::default(),
+        lpszMenuName: PCWSTR::null(),
+        lpszClassName: PCWSTR(broadcast_class_name.as_ptr()),
+        hIconSm: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
+    };
+    if RegisterClassExW(&broadcast_wc) == 0 {
+        tracing::warn!("RegisterClassExW (broadcast window) failed — WM_DISPLAYCHANGE will not work");
+    }
+    let broadcast_hwnd = match CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        PCWSTR(broadcast_class_name.as_ptr()),
+        PCWSTR::null(),
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        None, // no parent — must be a real top-level window to receive broadcasts
+        HMENU::default(),
+        instance,
+        None,
+    ) {
+        Ok(h) => {
+            tracing::info!("Broadcast-receiver window HWND={:?}", h);
+            h
+        }
+        Err(e) => {
+            tracing::warn!("CreateWindowExW (broadcast window) failed: {:?} — WM_DISPLAYCHANGE will not work", e);
+            HWND::default()
+        }
+    };
+
     // Initialize AppState on the heap so we can take a stable pointer.
     let mut app_state = Box::new(AppState {
         config: config.clone(),
@@ -260,6 +324,7 @@ unsafe fn run_message_loop(config: AppConfig, config_dir: std::path::PathBuf) {
         previous_foreground: None,
         window_snapshot: Vec::new(),
         msg_hwnd,
+        broadcast_hwnd,
         settings_panel: settings_panel::SettingsPanelManager::new(),
     });
 
@@ -414,6 +479,11 @@ unsafe extern "system" fn main_wndproc(
             if wparam.0 == animation::FADE_TIMER_ID {
                 handle_fade_timer(app);
             }
+            LRESULT(0)
+        }
+
+        WM_DISPLAYCHANGE => {
+            handle_display_change(app);
             LRESULT(0)
         }
 
@@ -574,15 +644,7 @@ unsafe extern "system" fn overlay_wndproc(
                         // DrawIconEx renders an HICON into a GDI HDC at any size.
                         // DI_NORMAL = draw the icon with its mask (transparency respected).
                         let _ = DrawIconEx(
-                            hdc,
-                            icon_x,
-                            icon_y,
-                            hicon,
-                            icon_size,
-                            icon_size,
-                            0,
-                            None,
-                            DI_NORMAL,
+                            hdc, icon_x, icon_y, hicon, icon_size, icon_size, 0, None, DI_NORMAL,
                         );
                     }
 
@@ -703,8 +765,8 @@ unsafe fn activate_overlay(app: &mut AppState) {
         app.overlay_manager.all_hwnds(),
         &mon_clone,
         &app.mru_tracker,
-        &app.session_tags,
     );
+    refresh_quick_tags(&mut app.window_snapshot, &app.config.quick_tags, &mut app.session_tags);
 
     tracing::info!("Activating overlay: {} windows", app.window_snapshot.len());
 
@@ -763,12 +825,12 @@ unsafe fn activate_label_mode(app: &mut AppState) {
     app.session_tags.release_closed();
 
     let mon_clone = app.overlay_manager.monitors.clone();
-    let raw_snapshot = snapshot_windows(
+    let mut raw_snapshot = snapshot_windows(
         app.overlay_manager.all_hwnds(),
         &mon_clone,
         &app.mru_tracker,
-        &app.session_tags,
     );
+    refresh_quick_tags(&mut raw_snapshot, &app.config.quick_tags, &mut app.session_tags);
 
     // Filter out windows that are fully occluded by higher-Z-order windows.
     // These would only add invisible labels that confuse the user.
@@ -902,6 +964,7 @@ unsafe fn handle_overlay_key(vk_code: u32) {
             // Both modes use the same hide mechanism
             app.overlay_manager
                 .begin_hide(&mut app.overlay_state, Some(target));
+            app.previous_foreground = None;
         }
         KeyAction::Dismiss => {
             if is_label_mode {
@@ -910,7 +973,29 @@ unsafe fn handle_overlay_key(vk_code: u32) {
                 dismiss_overlay(app);
             }
         }
-        KeyAction::TagAssigned => {
+        KeyAction::TagAssigned { number, hwnd } => {
+            if let Some(exe_path) = app
+                .window_snapshot
+                .iter()
+                .find(|window| window.hwnd == hwnd)
+                .and_then(|window| window.exe_path.clone())
+            {
+                app.config.set_quick_tag(number, exe_path);
+                if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
+                    tracing::error!("Failed to save config after quick tag assignment: {}", e);
+                }
+            } else {
+                app.config.remove_quick_tag(number);
+                app.session_tags.remove(number);
+                if let Err(e) = AppConfig::save(&app.config_dir, &app.config) {
+                    tracing::error!("Failed to save config after quick tag removal: {}", e);
+                }
+                tracing::warn!(
+                    "Quick tag {} assigned to window without executable path",
+                    number
+                );
+            }
+
             // Refresh number_tag fields from session_tags so the quick list updates
             for w in &mut app.window_snapshot {
                 w.number_tag = app.session_tags.get_tag_for_hwnd(w.hwnd);
@@ -924,6 +1009,38 @@ unsafe fn handle_overlay_key(vk_code: u32) {
     }
 }
 
+/// Called on `WM_DISPLAYCHANGE` — re-enumerate monitors and update every overlay HWND
+/// so the selector mask covers the correct area at the new resolution.
+///
+/// If the overlay is currently visible (Active / LabelMode) it is dismissed first so
+/// the user is not stuck inside a mispositioned overlay.  The next hotkey press will
+/// open it at the correct size.
+unsafe fn handle_display_change(app: &mut AppState) {
+    tracing::info!("WM_DISPLAYCHANGE received — re-enumerating monitors");
+
+    // Dismiss the overlay if it is currently visible so we don't leave a
+    // stale, wrongly-sized overlay on screen.
+    match &app.overlay_state {
+        OverlayState::Active { .. } => {
+            tracing::info!("Display changed while overlay active — dismissing");
+            dismiss_overlay(app);
+        }
+        OverlayState::LabelMode { .. } => {
+            tracing::info!("Display changed while label mode active — dismissing");
+            dismiss_label_mode(app);
+        }
+        _ => {}
+    }
+
+    // Re-enumerate monitors and push new geometry into the overlay manager.
+    let new_monitors = get_all_monitors();
+    tracing::info!(
+        "New monitor layout: {} monitor(s)",
+        new_monitors.len()
+    );
+    app.overlay_manager.on_display_change(new_monitors);
+}
+
 unsafe fn handle_fade_timer(app: &mut AppState) {
     let animation_complete = app.overlay_manager.on_fade_timer();
 
@@ -935,18 +1052,21 @@ unsafe fn handle_fade_timer(app: &mut AppState) {
                 tracing::info!("Fade-in complete");
             }
             OverlayState::FadingOut { switch_target } => {
-                app.overlay_manager.hide_windows();
-                app.overlay_state = OverlayState::Hidden;
-
-                keyboard_hook::set_active(false);
-
+                // Switch before hiding — we still hold the foreground lock at this point.
+                // Calling hide_windows() first would transfer the foreground back to the
+                // previous window, causing SetForegroundWindow to fail for the target.
                 if let Some(target) = switch_target {
                     let _ = switch_to_window(target);
-                } else if let Some(prev) = app.previous_foreground {
-                    let _ = restore_focus(prev);
+                }
+                app.overlay_manager.hide_windows();
+                app.overlay_state = OverlayState::Hidden;
+                keyboard_hook::set_active(false);
+                if switch_target.is_none() {
+                    if let Some(prev) = app.previous_foreground {
+                        let _ = restore_focus(prev);
+                    }
                 }
                 app.previous_foreground = None;
-
                 tracing::debug!("Fade-out complete");
             }
             _ => {}

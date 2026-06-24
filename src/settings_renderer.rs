@@ -5,18 +5,20 @@
 use crate::config::{AppConfig, LabelOverlapStrategy};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_COLOR_F, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
+};
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_REGULAR, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_FONT_WEIGHT_REGULAR, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -111,8 +113,7 @@ impl SettingsRenderer {
         unsafe {
             let d2d_factory: ID2D1Factory =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let dwrite_factory: IDWriteFactory =
-                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
 
             // Use GetClientRect for sizing (handles DPI correctly per SA review)
             let mut client_rect = RECT::default();
@@ -139,38 +140,38 @@ impl SettingsRenderer {
             render_target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
             // Color palette — dark theme matching overlay
-            let bg_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.08, 0.09, 0.13, 1.0), None)?;
-            let section_heading_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.9, 0.9, 1.0, 1.0), None)?;
-            let label_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.75, 0.77, 0.85, 1.0), None)?;
-            let value_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.6, 0.62, 0.7, 1.0), None)?;
-            let separator_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(1.0, 1.0, 1.0, 0.08), None)?;
-            let slider_track_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.2, 0.22, 0.3, 1.0), None)?;
-            let slider_fill_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.35, 0.55, 1.0, 1.0), None)?;
-            let slider_thumb_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(1.0, 1.0, 1.0, 0.95), None)?;
-            let toggle_off_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.2, 0.22, 0.3, 1.0), None)?;
-            let toggle_on_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.35, 0.55, 1.0, 1.0), None)?;
-            let toggle_knob_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(1.0, 1.0, 1.0, 0.95), None)?;
-            let hotkey_field_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.12, 0.14, 0.20, 1.0), None)?;
-            let hotkey_recording_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.35, 0.55, 1.0, 0.25), None)?;
-            let hotkey_error_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.9, 0.2, 0.2, 0.25), None)?;
-            let button_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.2, 0.22, 0.3, 0.8), None)?;
-            let button_text_brush = render_target
-                .CreateSolidColorBrush(&d2d_color(0.9, 0.9, 1.0, 1.0), None)?;
+            let bg_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.08, 0.09, 0.13, 1.0), None)?;
+            let section_heading_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.9, 0.9, 1.0, 1.0), None)?;
+            let label_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.75, 0.77, 0.85, 1.0), None)?;
+            let value_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.6, 0.62, 0.7, 1.0), None)?;
+            let separator_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(1.0, 1.0, 1.0, 0.08), None)?;
+            let slider_track_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.2, 0.22, 0.3, 1.0), None)?;
+            let slider_fill_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.35, 0.55, 1.0, 1.0), None)?;
+            let slider_thumb_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(1.0, 1.0, 1.0, 0.95), None)?;
+            let toggle_off_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.2, 0.22, 0.3, 1.0), None)?;
+            let toggle_on_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.35, 0.55, 1.0, 1.0), None)?;
+            let toggle_knob_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(1.0, 1.0, 1.0, 0.95), None)?;
+            let hotkey_field_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.12, 0.14, 0.20, 1.0), None)?;
+            let hotkey_recording_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.35, 0.55, 1.0, 0.25), None)?;
+            let hotkey_error_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.9, 0.2, 0.2, 0.25), None)?;
+            let button_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.2, 0.22, 0.3, 0.8), None)?;
+            let button_text_brush =
+                render_target.CreateSolidColorBrush(&d2d_color(0.9, 0.9, 1.0, 1.0), None)?;
 
             let font_name: Vec<u16> = "Segoe UI Variable\0".encode_utf16().collect();
             let locale: Vec<u16> = "en-us\0".encode_utf16().collect();
@@ -267,18 +268,12 @@ impl SettingsRenderer {
     /// Resize the render target when the window is resized.
     pub fn resize(&self, width: u32, height: u32) {
         unsafe {
-            let _ = self
-                .render_target
-                .Resize(&D2D_SIZE_U { width, height });
+            let _ = self.render_target.Resize(&D2D_SIZE_U { width, height });
         }
     }
 
     /// Render the complete settings panel. Returns updated control hit-test rects.
-    pub fn draw_panel(
-        &self,
-        config: &AppConfig,
-        state: &DrawState,
-    ) -> ControlRects {
+    pub fn draw_panel(&self, config: &AppConfig, state: &DrawState) -> ControlRects {
         let mut rects = ControlRects::default();
         unsafe {
             self.render_target.BeginDraw();
@@ -351,10 +346,16 @@ impl SettingsRenderer {
             } else if !state.main_hotkey_error.is_empty() {
                 &state.main_hotkey_error
             } else {
-                mhk_text_owned = crate::hotkey::format_hotkey(config.hotkey_modifiers, config.hotkey_vk);
+                mhk_text_owned =
+                    crate::hotkey::format_hotkey(config.hotkey_modifiers, config.hotkey_vk);
                 &mhk_text_owned
             };
-            self.draw_hotkey_field(&mhk_rect, mhk_text, state.recording_target == 1, !state.main_hotkey_error.is_empty());
+            self.draw_hotkey_field(
+                &mhk_rect,
+                mhk_text,
+                state.recording_target == 1,
+                !state.main_hotkey_error.is_empty(),
+            );
 
             // Label hotkey field (y=90)
             let lhk_y = 90.0_f32;
@@ -372,10 +373,18 @@ impl SettingsRenderer {
             } else if !state.label_hotkey_error.is_empty() {
                 &state.label_hotkey_error
             } else {
-                lhk_text_owned = crate::hotkey::format_hotkey(config.label_hotkey_modifiers, config.label_hotkey_vk);
+                lhk_text_owned = crate::hotkey::format_hotkey(
+                    config.label_hotkey_modifiers,
+                    config.label_hotkey_vk,
+                );
                 &lhk_text_owned
             };
-            self.draw_hotkey_field(&lhk_rect, lhk_text, state.recording_target == 2, !state.label_hotkey_error.is_empty());
+            self.draw_hotkey_field(
+                &lhk_rect,
+                lhk_text,
+                state.recording_target == 2,
+                !state.label_hotkey_error.is_empty(),
+            );
 
             // ---- BEHAVIOR SECTION ----
             let beh_y = 140.0_f32;
@@ -478,7 +487,13 @@ impl SettingsRenderer {
                 let raw_val = state.slider_values[i];
                 let t_min = slider_configs[i].1;
                 let t_max = slider_configs[i].2;
-                self.draw_slider(&track_rect, raw_val, t_min, t_max, state.active_slider == Some(i));
+                self.draw_slider(
+                    &track_rect,
+                    raw_val,
+                    t_min,
+                    t_max,
+                    state.active_slider == Some(i),
+                );
 
                 // Value label
                 let val_text = if i == 0 {
@@ -598,7 +613,14 @@ impl SettingsRenderer {
     }
 
     /// Draw a horizontal slider (track + filled portion + thumb).
-    fn draw_slider(&self, track_rect: &RECT, value: f32, min_val: f32, max_val: f32, _active: bool) {
+    fn draw_slider(
+        &self,
+        track_rect: &RECT,
+        value: f32,
+        min_val: f32,
+        max_val: f32,
+        _active: bool,
+    ) {
         unsafe {
             let r = rect_to_d2d(track_rect);
             let range = (max_val - min_val).max(0.001);

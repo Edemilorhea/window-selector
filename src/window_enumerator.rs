@@ -1,12 +1,17 @@
+use crate::config::QuickTagEntry;
 use crate::mru_tracker::MruTracker;
+use crate::state::SessionTags;
 use crate::window_info::WindowInfo;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetShellWindow, GetWindow, GetWindowLongW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
-    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GWL_EXSTYLE, GW_OWNER, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Set of overlay HWNDs to exclude from the window snapshot.
@@ -130,6 +135,7 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
     let mut buf = vec![0u16; (title_len as usize) + 1];
     GetWindowTextW(hwnd, &mut buf);
     let title = String::from_utf16_lossy(&buf[..title_len as usize]);
+    let exe_path = get_window_exe_path(hwnd);
 
     // Get window class name for filtering
     let mut class_buf = vec![0u16; 256];
@@ -162,8 +168,10 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         .position(|m| m.handle == monitor_handle)
         .unwrap_or(0);
 
-    ctx.windows
-        .push(WindowInfo::new(hwnd, title, is_minimized, monitor_index));
+    ctx.windows.push(WindowInfo {
+        exe_path,
+        ..WindowInfo::new(hwnd, title, is_minimized, monitor_index)
+    });
 
     BOOL(1) // Continue enumeration
 }
@@ -173,7 +181,6 @@ pub fn snapshot_windows(
     own_hwnds: &[HWND],
     monitors: &[crate::monitor::MonitorInfo],
     mru_tracker: &MruTracker,
-    session_tags: &crate::state::SessionTags,
 ) -> Vec<WindowInfo> {
     let mut windows = enumerate_windows(own_hwnds, monitors);
 
@@ -183,10 +190,9 @@ pub fn snapshot_windows(
     // Assign letters
     crate::letter_assignment::assign_letters(&mut windows);
 
-    // Re-apply session tags and fetch each window's icon once.
+    // Fetch each window's icon once.
     // Caching here avoids sending WM_GETICON on every WM_PAINT repaint.
     for window in &mut windows {
-        window.number_tag = session_tags.get_tag_for_hwnd(window.hwnd);
         window.icon = crate::window_icon::get_window_icon(window.hwnd);
     }
 
@@ -203,6 +209,241 @@ pub fn snapshot_windows(
     }
 
     windows
+}
+
+#[allow(dead_code)]
+/// Resolve persistent quick-list tags to the best current HWNDs.
+///
+/// `windows` must already be sorted by MRU order so the first matching window for an
+/// executable path is the best active candidate for that tag.
+pub fn resolve_quick_tags(windows: &mut [WindowInfo], quick_tags: &[QuickTagEntry]) -> SessionTags {
+    for window in windows.iter_mut() {
+        window.number_tag = None;
+    }
+
+    let mut resolved = SessionTags::new();
+    for entry in quick_tags {
+        if let Some(i) = find_by_exe_path(windows, &entry.exe_path) {
+            windows[i].number_tag = Some(entry.number);
+            resolved.assign(entry.number, windows[i].hwnd);
+        }
+    }
+
+    resolved
+}
+
+/// Returns the index of the first window whose exe_path matches (case-insensitive).
+fn find_by_exe_path(windows: &[WindowInfo], exe_path: &str) -> Option<usize> {
+    windows.iter().position(|w| {
+        w.exe_path
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(exe_path))
+    })
+}
+
+/// Like `resolve_quick_tags` but preserves existing live HWND assignments in `session_tags`.
+/// Only falls back to exe_path matching when the recorded HWND is both absent from the
+/// current snapshot AND no longer a valid window (e.g. closed). If the HWND is alive but
+/// temporarily off-screen (cloaked on another virtual desktop), the binding is kept as-is
+/// so the user's tag survives a desktop switch.
+pub fn refresh_quick_tags(
+    windows: &mut [WindowInfo],
+    quick_tags: &[QuickTagEntry],
+    session_tags: &mut SessionTags,
+) {
+    for window in windows.iter_mut() {
+        window.number_tag = None;
+    }
+
+    for entry in quick_tags {
+        // If session_tags has an HWND for this tag, try to honour it.
+        if let Some(hwnd) = session_tags.get(entry.number) {
+            if let Some(window) = windows.iter_mut().find(|w| w.hwnd == hwnd) {
+                // Tagged window is in the snapshot — mark it and keep the binding.
+                window.number_tag = Some(entry.number);
+                continue;
+            }
+            // HWND not in snapshot. If the window is still alive (e.g. cloaked on
+            // another virtual desktop), keep the binding but show no badge this session.
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
+                continue;
+            }
+        }
+
+        // No live binding — fall back to first exe_path match.
+        if let Some(i) = find_by_exe_path(windows, &entry.exe_path) {
+            windows[i].number_tag = Some(entry.number);
+            session_tags.assign(entry.number, windows[i].hwnd);
+        }
+    }
+}
+
+fn get_window_exe_path(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        if process_id == 0 {
+            return None;
+        }
+
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let mut buffer = vec![0u16; 32768];
+        let mut size = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = windows::Win32::Foundation::CloseHandle(process);
+        if result.is_err() || size == 0 {
+            return None;
+        }
+
+        Some(String::from_utf16_lossy(&buffer[..size as usize]))
+    }
+}
+
+#[cfg(test)]
+mod quick_tag_tests {
+    use super::*;
+
+    fn hwnd(n: isize) -> HWND {
+        HWND(n as *mut _)
+    }
+
+    fn make_window(hwnd_n: isize, exe_path: &str) -> WindowInfo {
+        WindowInfo {
+            exe_path: Some(exe_path.to_string()),
+            ..WindowInfo::new(hwnd(hwnd_n), format!("Window {}", hwnd_n), false, 0)
+        }
+    }
+
+    #[test]
+    fn test_resolve_quick_tags_matches_executable_path() {
+        let mut windows = vec![
+            make_window(1, r"C:\Program Files\App\app.exe"),
+            make_window(2, r"C:\Windows\System32\notepad.exe"),
+        ];
+        let quick_tags = vec![QuickTagEntry {
+            number: 1,
+            exe_path: String::from(r"C:\Windows\System32\notepad.exe"),
+        }];
+
+        let resolved = resolve_quick_tags(&mut windows, &quick_tags);
+
+        assert_eq!(resolved.get(1), Some(hwnd(2)));
+        assert_eq!(windows[1].number_tag, Some(1));
+    }
+
+    #[test]
+    fn test_resolve_quick_tags_uses_mru_order_for_same_app() {
+        let mut windows = vec![
+            make_window(1, r"C:\Program Files\App\app.exe"),
+            make_window(2, r"C:\Program Files\App\app.exe"),
+        ];
+        let quick_tags = vec![QuickTagEntry {
+            number: 3,
+            exe_path: String::from(r"C:\Program Files\App\app.exe"),
+        }];
+
+        let resolved = resolve_quick_tags(&mut windows, &quick_tags);
+
+        assert_eq!(resolved.get(3), Some(hwnd(1)));
+        assert_eq!(windows[0].number_tag, Some(3));
+        assert_eq!(windows[1].number_tag, None);
+    }
+
+    #[test]
+    fn test_resolve_quick_tags_leaves_unmatched_tags_unresolved() {
+        let mut windows = vec![make_window(1, r"C:\Program Files\App\app.exe")];
+        let quick_tags = vec![QuickTagEntry {
+            number: 9,
+            exe_path: String::from(r"C:\Windows\System32\notepad.exe"),
+        }];
+
+        let resolved = resolve_quick_tags(&mut windows, &quick_tags);
+
+        assert_eq!(resolved.get(9), None);
+        assert_eq!(windows[0].number_tag, None);
+    }
+
+    // --- refresh_quick_tags ---
+
+    #[test]
+    fn test_refresh_preserves_existing_session_binding() {
+        // Two terminals with same exe. Session already tagged the second (hwnd 2).
+        // refresh must NOT reassign to the first (MRU-first kidnapping).
+        let mut windows = vec![
+            make_window(1, r"C:\WindowsTerminal.exe"),
+            make_window(2, r"C:\WindowsTerminal.exe"),
+        ];
+        let mut session_tags = SessionTags::new();
+        session_tags.assign(1, hwnd(2));
+        let quick_tags = vec![QuickTagEntry {
+            number: 1,
+            exe_path: String::from(r"C:\WindowsTerminal.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(session_tags.get(1), Some(hwnd(2)), "binding must not be kidnapped");
+        assert_eq!(windows[1].number_tag, Some(1));
+        assert_eq!(windows[0].number_tag, None);
+    }
+
+    #[test]
+    fn test_refresh_falls_back_when_session_hwnd_gone() {
+        // session_tags points to hwnd(99) which is not in the snapshot and is not a
+        // real Win32 window (IsWindow returns false for a fake pointer), so the
+        // fallback to exe_path matching should fire.
+        let mut windows = vec![make_window(1, r"C:\app.exe")];
+        let mut session_tags = SessionTags::new();
+        session_tags.assign(2, hwnd(99));
+        let quick_tags = vec![QuickTagEntry {
+            number: 2,
+            exe_path: String::from(r"C:\app.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(session_tags.get(2), Some(hwnd(1)), "should rebind to live window");
+        assert_eq!(windows[0].number_tag, Some(2));
+    }
+
+    #[test]
+    fn test_refresh_no_binding_when_no_exe_match() {
+        let mut windows = vec![make_window(1, r"C:\other.exe")];
+        let mut session_tags = SessionTags::new();
+        let quick_tags = vec![QuickTagEntry {
+            number: 5,
+            exe_path: String::from(r"C:\app.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(session_tags.get(5), None);
+        assert_eq!(windows[0].number_tag, None);
+    }
+
+    #[test]
+    fn test_refresh_clears_all_number_tags_before_assigning() {
+        // A window with a stale number_tag from a previous session must be cleared.
+        let mut windows = vec![{
+            let mut w = make_window(1, r"C:\app.exe");
+            w.number_tag = Some(7);
+            w
+        }];
+        let mut session_tags = SessionTags::new();
+        let quick_tags = vec![QuickTagEntry {
+            number: 3,
+            exe_path: String::from(r"C:\app.exe"),
+        }];
+
+        refresh_quick_tags(&mut windows, &quick_tags, &mut session_tags);
+
+        assert_eq!(windows[0].number_tag, Some(3), "stale tag 7 replaced by 3");
+    }
 }
 
 // ---------------------------------------------------------------------------
